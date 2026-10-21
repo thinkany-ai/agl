@@ -1,130 +1,134 @@
 # agl — AgentLink
 
-一个 Rust 单文件二进制（约 4MB），用来驱动本机的编码 Agent：Claude Code、Codex、Gemini、Kimi、OpenCode、Grok、Cursor 等。它提供：
+English | [简体中文](README.zh-CN.md)
 
-- 常驻热会话、并发与排队、审批、运行中插话（steer）、中断、模型列表、自动垃圾回收；
-- 一条 `curl … | sh` 就能把任意机器接入你的 Web 应用，网页和机器上的 Agent 双向通信。
+agl is a single Rust binary (about 4 MB) that drives the coding agents installed on a machine: Claude Code, Codex, Gemini, Kimi, OpenCode, Grok, Cursor and more.
 
-设计参考了 [botiverse/oar](https://github.com/botiverse/oar)、douchat 和 Fleet 的本地运行时。各种接入方式的对比和实测数据见 [docs/comparison.md](docs/comparison.md)。
+- **Run agents well:** persistent warm sessions, concurrency and queueing, approvals, mid-turn steering, interrupts, model lists and automatic garbage collection.
+- **Reach them from the web:** one `curl … | sh` links any machine to your web app, so the web page and the agents on that machine talk both ways.
+
+The design draws on [botiverse/oar](https://github.com/botiverse/oar) and on the local runtimes of two existing products, douchat and Fleet. For how the integration options compare, with measured numbers, see [docs/comparison.md](docs/comparison.md) (in Chinese).
 
 ```
- 浏览器 ──> 你的后端 / agl hub <──wss（机器主动外连）── agl daemon ─┬─ claude   （stream-json + 控制协议）
- 终端 / 桌面 App / 运行时 ──ws://127.0.0.1──────────────────────────┤─ codex    （app-server JSON-RPC）
- Rust App ──进程内调用 agl::session::Manager────────────────────────┤─ gemini · kimi · opencode · grok · …（ACP）
-                                                                   └─ cursor · pi（每轮启动一次，原生 resume）
+ browser ──> your backend / agl hub <──wss (machine dials out)── agl daemon ─┬─ claude   (stream-json + control protocol)
+ terminal / desktop app / runtime ──ws://127.0.0.1───────────────────────────┤─ codex    (app-server JSON-RPC)
+ Rust app ──in-process agl::session::Manager─────────────────────────────────┤─ gemini · kimi · opencode · grok · … (ACP)
+                                                                             └─ cursor · pi (one process per turn, native resume)
 ```
 
-## 能力
+## Features
 
 | | |
 |---|---|
-| **一套协议驱动 11+ 种 Agent** | 每个 Agent 都用它最好的第一方接口；还可以通过配置接入任意支持 ACP 的 CLI |
-| **热会话、复用上下文** | 两轮之间进程不退出；被回收或重启后用原生 resume 接上原对话。实测 claude 每轮首字从约 6s 降到约 1s |
-| **复用会话** | 用名字复用（`-s name`）。CLI、桌面 App、网页共用同一批会话，可以互相接着聊；会话历史落盘，带续传游标 |
-| **并发、排队、steer** | 不同会话并行；同一会话内排队执行，或把消息插入正在进行的一轮（claude、codex） |
-| **审批** | 四档权限 `full` / `edit` / `ask` / `read_only`。claude、codex、ACP 的权限请求统一转成 `permission_request`，没人回答时超时自动拒绝 |
-| **自动垃圾回收** | 进程数硬上限（按 LRU 驱逐空闲会话）、空闲挂起、过期删除；崩溃后自动清理残留进程 |
-| **稳定性** | 有心跳和卡死检测；中断 10s 后仍未结束就强制结束；API key 冲突时自动改用 CLI 的登录账号；从登录 shell 导入 PATH 和 key |
-| **远程接入** | 一次性配对码、每台机器独立 token、可吊销；安装脚本只允许 HTTPS、校验 sha256，并注册 launchd / systemd 开机自启 |
-| **接入方式** | 本地 WebSocket，零依赖 TypeScript 客户端，Rust crate，给编码 Agent 用的接入 skill |
+| **One protocol, 11+ agents** | Each agent is driven through its best first-party interface. Any ACP-speaking CLI can be added through config. |
+| **Warm sessions, reused context** | The agent process stays alive between turns. After it is suspended, or after a daemon restart, native resume continues the same conversation. Measured: Claude's time to first token drops from about 6s to about 1s per turn. |
+| **Reusable sessions** | Sessions can be reused by name (`-s name`). The CLI, desktop apps and the web share the same sessions, so one can pick up where another left off. History is persisted, with a resume cursor. |
+| **Concurrency, queueing, steering** | Different sessions run in parallel. Within a session, prompts either queue or are injected into the running turn (claude, codex). |
+| **Approvals** | Four access levels: `full`, `edit`, `ask`, `read_only`. Permission requests from claude, codex and ACP agents all arrive as `permission_request` events, and are denied automatically if nobody answers in time. |
+| **Automatic GC** | A hard cap on live processes (least recently used idle sessions are evicted first). Idle processes are suspended and expired sessions removed. Processes orphaned by a crash are reaped on the next start. |
+| **Reliability** | Heartbeats and stall detection. A turn that hasn't stopped 10s after an interrupt is killed. Claude falls back to its own login when an exported API key is rejected. PATH and API keys are imported from the login shell. |
+| **Remote linking** | One-time pairing codes and a per-machine token that can be revoked. The installer is HTTPS-only, verifies a sha256 checksum, and sets up launchd/systemd autostart. |
+| **Integration options** | A local WebSocket API, a zero-dependency TypeScript client, a Rust crate, and an integration skill for coding agents. |
 
-## 安装
+## Install
 
 ```bash
-# 从源码安装（需要较新的 stable Rust）
+# From source (needs a recent stable Rust)
 cargo install --git https://github.com/thinkany-ai/agl
 
-# 或者克隆后构建
+# Or clone and build
 git clone https://github.com/thinkany-ai/agl.git && cd agl
-cargo build --release          # 产物：target/release/agl
+cargo build --release          # binary: target/release/agl
 ```
 
-支持 macOS（Apple 芯片 / Intel）和 Linux（x64 / arm64）；Windows 暂不支持。
+Supported on macOS (Apple silicon and Intel) and Linux (x64 and arm64). Windows is not supported yet.
 
-## 命令行
+## CLI
 
 ```bash
-agl agents                                   # 检测已安装的 agent 和各自支持的能力
-agl models codex                             # 列出可用模型（不会创建对话）
-agl run claude "这个仓库是做什么的？"          # 一次对话（daemon 会自动在后台启动）
-agl run claude -s proj --access ask "修复失败的测试"   # 命名会话；ask 模式会在终端里询问是否允许
-agl send proj "再跑一遍测试"                  # 继续已有会话
-agl send proj --steer "顺便把 lint 也修了"     # 插入正在进行的一轮
-agl chat kimi -s k                           # 交互式聊天（ACP Agent）
-agl configure proj -m opus --access edit     # 改模型或权限，保留对话
-agl approve proj <request_id> allow          # 在另一个终端处理审批
-agl sessions | history proj | attach         # 列表 / 历史 / 实时跟踪所有会话
+agl agents                                   # detect installed agents and what each supports
+agl models codex                             # list models (does not create a conversation)
+agl run claude "What does this repo do?"     # one turn (the daemon starts in the background)
+agl run claude -s proj --access ask "Fix the failing test"   # named session; ask mode prompts in the terminal
+agl send proj "Run the tests again"          # continue a session
+agl send proj --steer "Also fix lint"        # inject into the running turn
+agl chat kimi -s k                           # interactive chat (ACP agent)
+agl configure proj -m opus --access edit     # change model or access, keep the conversation
+agl approve proj <request_id> allow          # answer an approval from another terminal
+agl sessions | history proj | attach         # list / transcript / follow all sessions live
 agl abort proj | close proj | gc --idle
 agl status | start | stop
 ```
 
-## 接入你的产品
+## Integrating agl into your product
 
-**给编码 Agent 用的 skill**：[skills/agl-integration](skills/agl-integration/SKILL.md)。把这个目录复制到 `~/.claude/skills/`（或你的 Agent 的 skills 目录）后，说"用 agl 接入本地 agent"即可。下表是各种产品形态的接法：
+There is a skill for coding agents in [skills/agl-integration](skills/agl-integration/SKILL.md). Copy that directory into `~/.claude/skills/` (or your agent's skills directory), then ask your agent to "integrate local agents with agl".
 
-| 产品形态 | 做法 | 文档 |
+How each kind of product uses agl:
+
+| Product | How | Guide |
 |---|---|---|
-| 桌面 App（Electron / 原生），关掉 App 就不用 | 作为 sidecar 打包：`agl daemon --port 0 --parent-pid <pid>`，使用独立的 `AGL_HOME` | [desktop-app.md](skills/agl-integration/references/desktop-app.md) |
-| Rust 桌面 App（Tauri / GPUI） | 直接链接 `agl` crate，在进程内使用 `Manager` | [desktop-app.md#rust-in-process](skills/agl-integration/references/desktop-app.md#rust-in-process) |
-| Web 产品 | 用户执行 `curl …/install.sh?code=… \| sh`，机器主动外连到你的后端 | [web-product.md](skills/agl-integration/references/web-product.md) |
-| 已有自研运行时 / daemon | 保留你的配对和传输层，只把执行层换成 agl | [existing-runtime.md](skills/agl-integration/references/existing-runtime.md) |
+| Desktop app (Electron, native), agents only needed while it's open | Bundle agl as a sidecar: `agl daemon --port 0 --parent-pid <pid>` with its own `AGL_HOME` | [desktop-app.md](skills/agl-integration/references/desktop-app.md) |
+| Rust desktop app (Tauri, GPUI) | Link the `agl` crate and use `Manager` in-process | [desktop-app.md#rust-in-process](skills/agl-integration/references/desktop-app.md#rust-in-process) |
+| Web product | The user runs `curl …/install.sh?code=… \| sh`; the machine dials out to your backend | [web-product.md](skills/agl-integration/references/web-product.md) |
+| Existing runtime or daemon | Keep your own pairing and transport; replace only the execution layer with agl | [existing-runtime.md](skills/agl-integration/references/existing-runtime.md) |
 
-协议参考：[protocol.md](skills/agl-integration/references/protocol.md)。客户端：[clients/typescript/agl.ts](clients/typescript/agl.ts)。
+The full wire protocol is in [protocol.md](skills/agl-integration/references/protocol.md). The client is [clients/typescript/agl.ts](clients/typescript/agl.ts).
 
-### 参考 Hub
+### Reference hub
 
 ```bash
 agl hub --listen 0.0.0.0:8787 --public-url https://hub.example.com
 ```
 
-打开 `https://hub.example.com/?token=<admin>`，点"连接电脑"即可。Hub 会为每次连接生成一条带一次性配对码的安装命令，也可以复制安装说明交给 Agent 去执行。
+Open `https://hub.example.com/?token=<admin>` and click "连接电脑" (Connect computer; the hub UI is in Chinese). Each time, the hub generates an install command carrying a one-time pairing code. You can also copy setup instructions for an agent to run.
 
-Hub 网页支持：
-- 新建会话时选 Agent、模型和权限；
-- 流式对话；
-- 在网页上审批；
-- 运行中插话、停止；
-- 显示首字时间和总耗时；
-- 吊销机器。
+The hub web UI supports:
+- creating sessions with a chosen agent, model and access level;
+- streaming chat;
+- approving permission requests in the browser;
+- steering and stopping a running turn;
+- showing time to first token and total time;
+- revoking machines.
 
-Hub 的二进制分发：Hub 从 `--dist <dir>` 目录提供 `agl-<os>-<arch>` 及其 `.sha256`，和 Hub 同平台的那份可以直接提供。
+The hub serves `agl-<os>-<arch>` binaries and their `.sha256` files from `--dist <dir>`. The binary for the hub's own platform is served without any setup.
 
-## 配置
+## Configuration
 
-配置文件在 `~/.agl/config.json`，完整字段见 [protocol.md](skills/agl-integration/references/protocol.md#configuration-aglhomeconfigjson)。
+Settings live in `~/.agl/config.json`. All fields are listed in [protocol.md](skills/agl-integration/references/protocol.md#configuration-aglhomeconfigjson).
 
 ```json
 { "default_access": "full", "max_live": 8, "idle_timeout_secs": 600, "approval_timeout_secs": 600,
   "custom_agents": [{ "id": "goose", "command": "goose", "args": ["acp"], "protocol": "acp" }] }
 ```
 
-`~/.agl/` 下的其他文件：
+Other files in `~/.agl/`:
 
-| 文件 | 内容 |
+| File | Contents |
 |---|---|
-| `daemon.json` | 端口和本地 token，权限 0600 |
-| `sessions.json` | 会话列表 |
-| `history/` | 每个会话的事件历史 |
-| `daemon.log` | daemon 日志 |
+| `daemon.json` | Port and local token (mode 0600) |
+| `sessions.json` | Session list |
+| `history/` | Per-session event history |
+| `daemon.log` | Daemon log |
 
-## 仓库结构
+## Repository layout
 
-| 路径 | 内容 |
+| Path | Contents |
 |---|---|
-| `src/agents/` | 各 Agent 驱动：`claude.rs`、`codex.rs`、`acp.rs`、`oneshot.rs` |
-| `src/session.rs` | 会话管理：热会话、排队、steer、审批、GC、进程预算 |
-| `src/daemon.rs`、`src/link.rs` | 本地 daemon 与连接 Hub 的机器链路 |
-| `src/hub.rs`、`assets/` | 参考 Hub、网页 UI、安装脚本 |
-| `clients/typescript/` | 零依赖 TypeScript 客户端 |
-| `skills/agl-integration/` | 给编码 Agent 用的接入 skill |
-| `docs/` | 方案对比与实测 |
+| `src/agents/` | Agent drivers: `claude.rs`, `codex.rs`, `acp.rs`, `oneshot.rs` |
+| `src/session.rs` | Session manager: warm sessions, queueing, steering, approvals, GC, process budget |
+| `src/daemon.rs`, `src/link.rs` | Local daemon and the machine link to a hub |
+| `src/hub.rs`, `assets/` | Reference hub, web UI, install script |
+| `clients/typescript/` | Zero-dependency TypeScript client |
+| `skills/agl-integration/` | Integration skill for coding agents |
+| `docs/` | Comparison and benchmarks |
 
-## 安全
+## Security
 
-- `full` 等于让 Agent 以你的身份执行任意命令。远程场景请默认使用 `ask` 或 `edit`，并在 UI 里提供审批。
-- 本地 daemon 只监听 127.0.0.1，每个连接都要带 `daemon.json` 里的 token。
-- Hub 的机器 token 服务端只存哈希，可以单独吊销；配对码 10 分钟有效，只能用一次。
+- `full` access lets the agent run any command as you. For remote use, default to `ask` or `edit` and provide approvals in your UI.
+- The local daemon listens on 127.0.0.1 only, and every connection must present the token from `daemon.json`.
+- The hub stores only hashes of machine tokens, and each machine can be revoked individually. Pairing codes are single-use and expire after 10 minutes.
 
-## 许可证
+## License
 
 [MIT](LICENSE) © 2026 ThinkAny, LLC
