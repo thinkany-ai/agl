@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentLink Hub</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #ffffff; --muted: #f0f0ee; --line: #e4e4e0;
+    --text: #1d1d1b; --sub: #6b6b66; --accent: #111; --accent-text: #fff;
+    --ok: #1f8a4c; --bad: #c0392b; --warn: #b7791f; --tool: #f3f3f0; --ask: #fff7e6; --ask-line: #f0d9a8;
+    --radius: 14px; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413; --panel: #1c1c1a; --muted: #242422; --line: #2e2e2b;
+      --text: #ecece8; --sub: #9a9a93; --accent: #ecece8; --accent-text: #141413;
+      --tool: #22221f; --ask: #2a2416; --ask-line: #5a4a24;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif; }
+  button { font: inherit; cursor: pointer; border: 0; border-radius: 10px; padding: 8px 14px;
+    background: var(--muted); color: var(--text); white-space: nowrap; }
+  button.primary { background: var(--accent); color: var(--accent-text); }
+  button.small { padding: 4px 10px; font-size: 12px; }
+  button.link { background: none; padding: 2px 6px; color: var(--sub); }
+  button:disabled { opacity: .45; cursor: default; }
+  input, select, textarea { font: inherit; color: var(--text); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; width: 100%; min-width: 0; }
+  code, pre { font-family: var(--mono); font-size: 12.5px; }
+
+  header { display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+    border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0; flex: 1; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bad); display: inline-block; flex-shrink: 0; }
+  .dot.on { background: var(--ok); }
+  .dot.off { background: var(--line); }
+
+  .app { display: grid; grid-template-columns: 310px 1fr; height: calc(100vh - 57px); }
+  aside { border-right: 1px solid var(--line); overflow-y: auto; padding: 12px; background: var(--panel); }
+  .machine { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; margin-bottom: 10px; }
+  .machine.sel { border-color: var(--accent); }
+  .machine.offline { opacity: .6; }
+  .machine .title { display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }
+  .machine .title span.name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .machine .meta { color: var(--sub); font-size: 12px; margin-top: 2px; }
+  .agents { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .pill { font-size: 11px; padding: 1px 8px; border-radius: 99px; background: var(--muted); color: var(--sub); }
+  .pill.ok { color: var(--ok); }
+  .sessions { margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
+  .sess { padding: 6px 8px; border-radius: 8px; cursor: pointer; display: flex; gap: 8px; align-items: center; }
+  .sess:hover { background: var(--muted); }
+  .sess.sel { background: var(--muted); font-weight: 600; }
+  .sess .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .st { font-size: 11px; color: var(--sub); }
+  .st.running, .st.starting { color: var(--warn); }
+  .st.waiting { color: var(--bad); font-weight: 600; }
+  .empty { color: var(--sub); text-align: center; padding: 30px 10px; }
+
+  main { display: flex; flex-direction: column; min-width: 0; }
+  .topbar { padding: 10px 20px; border-bottom: 1px solid var(--line); display: flex; gap: 10px; align-items: center; min-height: 52px; }
+  .topbar .t { flex: 1; min-width: 0; }
+  .topbar .t b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .topbar .t span { color: var(--sub); font-size: 12px; }
+  #log { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+  .msg-user { align-self: flex-end; max-width: 75%; background: var(--accent); color: var(--accent-text);
+    padding: 8px 12px; border-radius: 14px 14px 4px 14px; white-space: pre-wrap; word-wrap: break-word; }
+  .msg-agent { max-width: 90%; white-space: pre-wrap; word-wrap: break-word; }
+  .tool { font-family: var(--mono); font-size: 12px; background: var(--tool); border-radius: 10px; padding: 6px 10px; max-width: 90%; }
+  .tool summary { cursor: pointer; list-style: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tool pre { margin: 6px 0 0; white-space: pre-wrap; max-height: 260px; overflow: auto; color: var(--sub); }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  .note { color: var(--sub); font-size: 12px; }
+  .note.bad { color: var(--bad); }
+  .ask { background: var(--ask); border: 1px solid var(--ask-line); border-radius: 12px; padding: 10px 12px; max-width: 90%; }
+  .ask .q { font-weight: 600; margin-bottom: 4px; }
+  .ask pre { margin: 4px 0 8px; white-space: pre-wrap; max-height: 160px; overflow: auto; font-size: 12px; }
+  .ask .acts { display: flex; gap: 8px; flex-wrap: wrap; }
+  .plan { background: var(--tool); border-radius: 10px; padding: 8px 12px; max-width: 90%; font-size: 13px; }
+  .plan div.done { color: var(--sub); text-decoration: line-through; }
+  .composer { border-top: 1px solid var(--line); padding: 12px 20px; display: flex; gap: 10px; align-items: flex-end; }
+  .composer textarea { resize: none; min-height: 44px; max-height: 200px; }
+  .composer button { height: 44px; flex-shrink: 0; }
+  .newform { display: grid; gap: 8px; margin-top: 8px; }
+  .newform .row { display: flex; gap: 8px; }
+
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; padding: 16px; z-index: 10; }
+  .modal-bg.open { display: flex; }
+  .modal { background: var(--panel); border-radius: 22px; width: min(760px, 100%); max-height: 92vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,.25); }
+  .modal .hd { padding: 22px 26px 16px; border-bottom: 1px solid var(--line); position: relative; }
+  .modal .hd h2 { margin: 0 0 6px; font-size: 20px; }
+  .modal .hd p { margin: 0; color: var(--sub); }
+  .modal .close { position: absolute; right: 16px; top: 14px; background: none; font-size: 22px; color: var(--sub); }
+  .modal .bd { padding: 20px 26px 24px; display: grid; gap: 14px; }
+  .tabs { display: grid; grid-template-columns: 1fr 1fr; background: var(--muted); border-radius: 12px; padding: 4px; }
+  .tabs button { background: none; color: var(--sub); }
+  .tabs button.on { background: var(--panel); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .card { background: var(--muted); border-radius: var(--radius); padding: 16px 18px; }
+  .card .row { display: flex; gap: 16px; align-items: center; }
+  .card .row > div { flex: 1; }
+  .card h3 { margin: 0 0 2px; font-size: 15px; }
+  .card p { margin: 0; color: var(--sub); font-size: 13px; }
+  .cmd { margin-top: 12px; display: flex; align-items: center; gap: 10px; background: var(--panel); border-radius: 12px; padding: 10px 12px; }
+  .modal .bd > *, .card .row > div { min-width: 0; }
+  .cmd code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; }
+  details.help summary { cursor: pointer; color: var(--sub); }
+  @media (max-width: 760px) {
+    .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; height: auto; min-height: calc(100vh - 57px); }
+    aside { border-right: 0; border-bottom: 1px solid var(--line); max-height: 40vh; }
+    .card .row { flex-direction: column; align-items: stretch; }
+    #log { padding: 16px; } .composer, .topbar { padding-left: 16px; padding-right: 16px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>AgentLink</h1>
+  <span class="dot" id="conn-dot" title="hub connection"></span>
+  <button class="primary" id="open-connect">＋ 连接电脑</button>
+</header>
+<div class="app">
+  <aside id="machines"><div class="empty">加载中…</div></aside>
+  <main>
+    <div class="topbar">
+      <div class="t" id="sess-title"><b>未选择会话</b><span>在左侧选择或新建一个会话</span></div>
+      <button id="btn-close-sess" style="display:none">关闭会话</button>
+    </div>
+    <div id="log"></div>
+    <div class="composer">
+      <textarea id="input" rows="1" placeholder="给 Agent 发消息…（Enter 发送，Shift+Enter 换行）" disabled></textarea>
+      <button id="btn-stop" style="display:none">停止</button>
+      <button class="primary" id="btn-send" disabled>发送</button>
+    </div>
+  </main>
+</div>
+
+<div class="modal-bg" id="connect-modal">
+  <div class="modal">
+    <div class="hd">
+      <h2>🖥 连接这台电脑</h2>
+      <p>安装 agl 后，即可在这里使用这台电脑上的 Agent（Claude Code、Codex、Gemini、Kimi、OpenCode 等）。Agent 直接在该电脑上运行。</p>
+      <button class="close" id="close-connect">×</button>
+    </div>
+    <div class="bd">
+      <div class="tabs" id="os-tabs">
+        <button class="on" data-os="mac">macOS</button>
+        <button data-os="linux">Linux</button>
+      </div>
+      <div class="card">
+        <div class="row">
+          <div>
+            <h3>🤖 交给 Agent 安装</h3>
+            <p>将安装说明发给这台电脑上已有的 Codex、Claude Code 等 Agent，让它帮你安装。</p>
+          </div>
+          <button class="primary" id="copy-agent">复制安装说明</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3>⌨️ 手动在终端安装</h3>
+        <p id="os-hint">打开"终端"，粘贴以下命令并按回车。请勿使用 sudo。</p>
+        <div class="cmd"><code id="install-cmd">生成中…</code><button class="primary" data-copy="install-cmd">复制安装命令</button></div>
+        <p class="note" id="code-exp" style="margin-top:8px"></p>
+      </div>
+      <details class="help">
+        <summary>安装完成后没有出现在列表里？</summary>
+        <p class="note">确认安装命令已运行完成后，在同一个终端运行以下命令，重新发起连接（配对码 10 分钟内有效、只能用一次）：</p>
+        <div class="cmd"><code id="connect-cmd"></code><button data-copy="connect-cmd">复制</button></div>
+      </details>
+    </div>
+  </div>
+</div>
+
+<script>
+const HUB = "__HUB_URL__";
+const qs = new URLSearchParams(location.search);
+let token = qs.get("token");
+try {
+  if (token) localStorage.setItem("agl-token", token); else token = localStorage.getItem("agl-token");
+} catch (_) {}
+if (!token) token = prompt("Hub token（启动 agl hub 时打印）") || "";
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const ACCESS = { full: "完全访问（不询问）", edit: "自动编辑，其余询问", ask: "每次询问", read_only: "只读" };
+
+const state = {
+  machines: [],
+  sessions: {},          // machine_id -> [meta]
+  models: {},            // machine_id:agent -> [model]
+  sel: { machine: null, session: null },
+  creating: null,
+  stalled: false,
+};
+let ws, nextId = 1;
+const pending = new Map();
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}/ws/ui?token=${encodeURIComponent(token)}`);
+  ws.onopen = () => $("conn-dot").classList.add("on");
+  ws.onclose = () => { $("conn-dot").classList.remove("on"); setTimeout(connect, 2000); };
+  ws.onmessage = (m) => onMessage(JSON.parse(m.data));
+}
+
+function request(machine_id, method, params = {}) {
+  const id = String(nextId++);
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    ws.send(JSON.stringify({ type: "request", id, machine_id, method, params }));
+  });
+}
+
+function onMessage(msg) {
+  if (msg.type === "response") {
+    const p = pending.get(msg.id);
+    if (!p) return;
+    pending.delete(msg.id);
+    msg.error ? p.reject(new Error(msg.error)) : p.resolve(msg.result);
+  } else if (msg.type === "machines") {
+    const before = new Set(state.machines.filter((m) => m.online).map((m) => m.machine_id));
+    state.machines = msg.machines;
+    const online = msg.machines.filter((m) => m.online);
+    if (!state.sel.machine && online.length) state.sel.machine = online[0].machine_id;
+    for (const m of online) if (!before.has(m.machine_id)) refreshSessions(m.machine_id);
+    renderSidebar();
+  } else if (msg.type === "event") {
+    onEvent(msg);
+  }
+}
+
+async function refreshSessions(mid) {
+  try { state.sessions[mid] = await request(mid, "session.list"); } catch (e) { state.sessions[mid] = []; }
+  renderSidebar(); updateTop();
+}
+
+async function loadModels(mid, agent) {
+  const key = `${mid}:${agent}`;
+  if (state.models[key]) return;
+  state.models[key] = [];
+  try { state.models[key] = (await request(mid, "agents.models", { agent })).models || []; } catch (_) {}
+  if (state.creating === mid) fillModels();
+}
+
+function fillModels() {
+  const sel = $("nf-model"); if (!sel) return;
+  const list = state.models[`${state.creating}:${$("nf-agent").value}`] || [];
+  sel.innerHTML = `<option value="">默认模型</option>` + list.map((m) => `<option value="${esc(m.id)}">${esc(m.name || m.id)}</option>`).join("");
+}
+
+function renderSidebar() {
+  const el = $("machines");
+  if (!state.machines.length) {
+    el.innerHTML = `<div class="empty">还没有连接的电脑<br><br><button class="primary" onclick="openConnect()">＋ 连接电脑</button></div>`;
+    return;
+  }
+  el.innerHTML = state.machines.map((m) => {
+    const sel = state.sel.machine === m.machine_id;
+    const avail = (m.agents || []).filter((a) => a.available);
+    const agents = avail.map((a) => `<span class="pill ok" title="${esc((a.features || []).join(", "))}">${esc(a.id)}</span>`).join("");
+    const sessions = m.online ? (state.sessions[m.machine_id] || []).map((s) => `
+      <div class="sess ${state.sel.session === s.id ? "sel" : ""}" onclick="selectSession('${m.machine_id}','${s.id}')">
+        <span class="name">${esc(s.name || s.id)}</span><span class="pill">${esc(s.agent)}</span><span class="st ${esc(s.status)}">${s.status === "waiting" ? "待审批" : esc(s.status)}</span>
+      </div>`).join("") : "";
+    const form = !m.online ? "" : state.creating === m.machine_id ? `
+      <div class="newform">
+        <select id="nf-agent" onchange="loadModels('${m.machine_id}', this.value); fillModels()">${avail.map((a) => `<option>${esc(a.id)}</option>`).join("")}</select>
+        <select id="nf-model"><option value="">默认模型</option></select>
+        <select id="nf-access">${Object.entries(ACCESS).map(([k, v]) => `<option value="${k}" ${k === "ask" ? "selected" : ""}>${v}</option>`).join("")}</select>
+        <input id="nf-cwd" placeholder="工作目录（默认 ~）">
+        <input id="nf-name" placeholder="会话名（可选，同名复用）">
+        <div class="row"><button onclick="state.creating=null;renderSidebar()">取消</button><button class="primary" onclick="createSession('${m.machine_id}')">创建</button></div>
+      </div>` : `<button style="margin-top:8px;width:100%" onclick="openCreate('${m.machine_id}')" ${avail.length ? "" : "disabled"}>＋ 新会话</button>`;
+    return `<div class="machine ${sel ? "sel" : ""} ${m.online ? "" : "offline"}">
+      <div class="title" onclick="state.sel.machine='${m.machine_id}';renderSidebar()"><span class="dot ${m.online ? "on" : "off"}"></span><span class="name">${esc(m.hostname || m.machine_id)}</span>
+        <button class="link small" title="移除这台电脑" onclick="event.stopPropagation();revoke('${m.machine_id}')">✕</button></div>
+      <div class="meta">${m.online ? `${esc(m.os)} · ${esc(m.arch)} · agl ${esc(m.version)}` : "离线"}</div>
+      <div class="agents">${agents}</div>
+      <div class="sessions">${sessions}</div>
+      ${form}
+    </div>`;
+  }).join("");
+  if (state.creating) fillModels();
+}
+
+function openCreate(mid) {
+  state.creating = mid; renderSidebar();
+  const agent = $("nf-agent")?.value; if (agent) loadModels(mid, agent);
+}
+
+async function revoke(mid) {
+  if (!confirm("移除这台电脑？它的连接凭证会被吊销，需要重新安装/配对才能再连接。")) return;
+  await request(null, "machines.revoke", { machine_id: mid }).catch((e) => alert(e.message));
+}
+
+async function createSession(mid) {
+  const p = { agent: $("nf-agent").value, model: $("nf-model").value || null, access: $("nf-access").value,
+    cwd: $("nf-cwd").value.trim() || null, name: $("nf-name").value.trim() || null, warm: true };
+  try {
+    const meta = await request(mid, "session.create", p);
+    state.creating = null;
+    await refreshSessions(mid);
+    selectSession(mid, meta.id);
+  } catch (e) { alert(e.message); }
+}
+
+function currentMeta() {
+  const { machine, session } = state.sel;
+  return (state.sessions[machine] || []).find((s) => s.id === session);
+}
+
+// ---- transcript rendering ----
+let agentBlock = null;
+const toolEls = new Map(), askEls = new Map();
+
+function resetLog() { $("log").innerHTML = ""; agentBlock = null; toolEls.clear(); askEls.clear(); }
+function stickBottom() { const log = $("log"); if (log.scrollHeight - log.scrollTop - log.clientHeight < 140) log.scrollTop = log.scrollHeight; }
+function append(el) { $("log").appendChild(el); stickBottom(); return el; }
+function div(cls, html) { const d = document.createElement("div"); d.className = cls; d.innerHTML = html; return d; }
+
+function summarize(input) {
+  if (!input || typeof input !== "object") return String(input ?? "");
+  for (const k of ["command", "file_path", "path", "pattern", "url", "query", "description"]) if (typeof input[k] === "string") return input[k];
+  return JSON.stringify(input);
+}
+const secs = (ms) => ms == null ? "-" : (ms / 1000).toFixed(1) + "s";
+
+function renderEvent(ev, live) {
+  switch (ev.kind) {
+    case "user_message": agentBlock = null; append(div("msg-user", esc(ev.text))); break;
+    case "text_delta": {
+      if (!ev.text) break;
+      if (!agentBlock) { if (!ev.text.trim()) break; agentBlock = append(div("msg-agent", "")); }
+      agentBlock.textContent += ev.text; stickBottom(); break;
+    }
+    case "tool_start": {
+      agentBlock = null;
+      const d = document.createElement("details"); d.className = "tool";
+      d.innerHTML = `<summary><span class="mark">⏺</span> <b>${esc(ev.name)}</b> ${esc(summarize(ev.input).slice(0, 200))}</summary><pre>${esc(JSON.stringify(ev.input, null, 2))}</pre>`;
+      toolEls.set(ev.call_id, d); append(d); break;
+    }
+    case "tool_end": {
+      const d = toolEls.get(ev.call_id); if (!d) break;
+      d.querySelector(".mark").outerHTML = ev.ok ? `<span class="ok">✓</span>` : `<span class="bad">✗</span>`;
+      if (ev.output) d.insertAdjacentHTML("beforeend", `<pre>${esc(ev.output)}</pre>`);
+      break;
+    }
+    case "permission_request": {
+      agentBlock = null;
+      const d = append(div("ask", `<div class="q">🔐 Agent 请求权限：${esc(ev.tool)}</div>
+        <div>${esc(ev.title || "")}</div><pre>${esc(JSON.stringify(ev.input, null, 2)).slice(0, 2000)}</pre>
+        <div class="acts">${(ev.options || []).includes("allow") ? `<button class="primary small" data-d="allow">允许</button>` : ""}
+        ${(ev.options || []).includes("allow_session") ? `<button class="small" data-d="allow_session">本会话内都允许</button>` : ""}
+        <button class="small" data-d="deny">拒绝</button></div>`));
+      d.querySelectorAll("button[data-d]").forEach((b) => (b.onclick = () => {
+        d.querySelectorAll("button").forEach((x) => (x.disabled = true));
+        request(state.sel.machine, "session.approve", { session_id: state.sel.session, request_id: ev.request_id, decision: b.dataset.d })
+          .catch((e) => { alert(e.message); d.querySelectorAll("button").forEach((x) => (x.disabled = false)); });
+      }));
+      askEls.set(ev.request_id, d); break;
+    }
+    case "permission_resolved": {
+      const d = askEls.get(ev.request_id); if (!d) break;
+      const label = { allow: "已允许", allow_session: "已允许（本会话）", deny: "已拒绝" }[ev.decision] || ev.decision;
+      const by = { policy: "（按权限策略）", timeout: "（超时）", cancelled: "（已取消）" }[ev.by] || "";
+      d.querySelector(".acts").innerHTML = `<span class="note ${ev.decision === "deny" ? "bad" : ""}">${label}${by}</span>`;
+      break;
+    }
+    case "plan": {
+      const items = Array.isArray(ev.entries) ? ev.entries : [];
+      if (!items.length) break;
+      agentBlock = null;
+      append(div("plan", "📋 计划<br>" + items.map((e) => `<div class="${e.status === "completed" ? "done" : ""}">${e.status === "in_progress" ? "▶" : e.status === "completed" ? "✓" : "○"} ${esc(e.content || e.title || "")}</div>`).join("")));
+      break;
+    }
+    case "queued": append(div("note", `排队中（第 ${ev.position} 位）`)); break;
+    case "steered": append(div("note", "↪ 已插入正在进行的回复")); break;
+    case "retrying": append(div("note", `重试中：${esc(ev.message)}`)); break;
+    case "heartbeat": if (live) { state.stalled = ev.stalled; updateTop(ev); } break;
+    case "turn_ended": {
+      agentBlock = null; state.stalled = false;
+      const t = ev.timing || {};
+      const timing = t.total_ms != null ? `首字 ${secs(t.first_text_ms)} · 共 ${secs(t.total_ms)}${t.warm ? " · 热会话" : ""}` : "";
+      if (ev.outcome !== "completed") append(div("note bad", (ev.outcome === "aborted" ? "已停止" : `失败：${esc(ev.error || "")}`) + (timing ? ` · ${timing}` : "")));
+      else if (timing) append(div("note", timing));
+      break;
+    }
+    case "error": append(div("note bad", esc(ev.message))); break;
+  }
+}
+
+async function selectSession(mid, sid) {
+  state.sel = { machine: mid, session: sid };
+  renderSidebar(); resetLog(); updateTop();
+  try {
+    const events = await request(mid, "session.history", { session_id: sid, limit: 1500 });
+    if (state.sel.session !== sid) return;
+    resetLog();
+    events.forEach((e) => renderEvent(e.event, false));
+    $("log").scrollTop = $("log").scrollHeight;
+  } catch (e) { append(div("note bad", esc(e.message))); }
+}
+
+function updateTop(hb) {
+  const m = currentMeta();
+  const running = m && ["running", "starting", "waiting"].includes(m.status);
+  const extra = hb && running ? ` · 已运行 ${secs(hb.elapsed_ms)}${hb.stalled ? ` · ${Math.round(hb.idle_ms / 1000)}s 无新输出` : ""}` : "";
+  $("sess-title").innerHTML = m
+    ? `<b>${esc(m.name || m.id)} · ${esc(m.agent)}</b><span>${esc(m.cwd)} · ${esc(m.status)} · ${esc(ACCESS[m.access] || m.access)}${m.model ? " · " + esc(m.model) : ""}${extra}</span>`
+    : `<b>未选择会话</b><span>在左侧选择或新建一个会话</span>`;
+  $("btn-close-sess").style.display = m ? "" : "none";
+  $("input").disabled = $("btn-send").disabled = !m;
+  $("btn-stop").style.display = running ? "" : "none";
+  const steer = running && (m.features || []).includes("steer");
+  $("btn-send").textContent = running ? (steer ? "插入" : "排队") : "发送";
+  $("btn-send").title = running ? (steer ? "把这条消息插入正在进行的回复" : "当前回复结束后再发送") : "";
+}
+
+function onEvent(msg) {
+  const list = state.sessions[msg.machine_id] || [];
+  const meta = list.find((s) => s.id === msg.session_id);
+  if (!meta) { refreshSessions(msg.machine_id); }
+  else if (msg.event.kind === "status") { meta.status = msg.event.status; renderSidebar(); }
+  else if (msg.event.kind === "info" && msg.event.model) { meta.model = meta.model || msg.event.model; }
+  if (msg.machine_id === state.sel.machine && msg.session_id === state.sel.session) {
+    renderEvent(msg.event, true);
+    if (msg.event.kind !== "heartbeat") updateTop();
+  }
+}
+
+async function send() {
+  const text = $("input").value;
+  if (!text.trim() || !state.sel.session) return;
+  $("input").value = "";
+  const m = currentMeta();
+  const running = m && ["running", "starting", "waiting"].includes(m.status);
+  const mode = running && (m.features || []).includes("steer") ? "steer" : "queue";
+  try { await request(state.sel.machine, "session.prompt", { session_id: state.sel.session, text, mode }); }
+  catch (e) { append(div("note bad", esc(e.message))); }
+}
+
+$("btn-send").onclick = send;
+$("input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+});
+$("btn-stop").onclick = () => request(state.sel.machine, "session.abort", { session_id: state.sel.session }).catch((e) => alert(e.message));
+$("btn-close-sess").onclick = async () => {
+  if (!confirm("关闭会话并结束该 Agent 进程？")) return;
+  const { machine, session } = state.sel;
+  await request(machine, "session.close", { session_id: session }).catch((e) => alert(e.message));
+  state.sel.session = null; resetLog(); updateTop(); refreshSessions(machine);
+};
+
+// ---- connect dialog: one-time pairing code per opening ----
+let installCmd = "", connectCmd = "";
+async function newCode() {
+  $("install-cmd").textContent = "生成中…";
+  try {
+    const r = await request(null, "pairing.create");
+    installCmd = `curl -fL --progress-bar "${HUB}/install.sh?code=${r.code}" | sh`;
+    connectCmd = `~/.agl/bin/agl connect ${HUB} --code ${r.code}`;
+    $("install-cmd").textContent = installCmd;
+    $("connect-cmd").textContent = connectCmd;
+    $("code-exp").innerHTML = `一次性配对码，${new Date(r.expires_at).toLocaleTimeString()} 前有效。<button class="link small" onclick="newCode()">重新生成</button>`;
+  } catch (e) { $("install-cmd").textContent = "生成失败：" + e.message; }
+}
+function openConnect() { $("connect-modal").classList.add("open"); newCode(); }
+window.openConnect = openConnect;
+$("open-connect").onclick = openConnect;
+$("close-connect").onclick = () => $("connect-modal").classList.remove("open");
+$("connect-modal").onclick = (e) => { if (e.target.id === "connect-modal") $("connect-modal").classList.remove("open"); };
+$("os-tabs").onclick = (e) => {
+  const os = e.target.dataset.os; if (!os) return;
+  [...$("os-tabs").children].forEach((b) => b.classList.toggle("on", b.dataset.os === os));
+  $("os-hint").textContent = os === "mac"
+    ? '打开"终端"，粘贴以下命令并按回车。支持 Apple 芯片与 Intel Mac，请勿使用 sudo。'
+    : "打开终端，粘贴以下命令并按回车（x64 / arm64）。请勿使用 sudo；有 systemd --user 时会自动开机启动。";
+};
+async function copy(text, btn) {
+  try { await navigator.clipboard.writeText(text); } catch (_) {
+    const t = document.createElement("textarea"); t.value = text; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove();
+  }
+  const old = btn.textContent; btn.textContent = "已复制 ✓"; setTimeout(() => (btn.textContent = old), 1500);
+}
+document.querySelectorAll("[data-copy]").forEach((b) => (b.onclick = () => copy($(b.dataset.copy).textContent, b)));
+$("copy-agent").onclick = (e) => copy(
+`请帮我在这台电脑上安装并连接 AgentLink（agl），让网页 ${HUB} 可以使用这台电脑上的 Agent：
+1. 用当前用户的正常权限在终端运行（不要使用 sudo；如果你运行在沙箱里、无法以正常权限启动后台服务，请让我自己在系统终端运行）：
+   ${installCmd}
+2. 运行 \`~/.agl/bin/agl status\`，确认 hub 一行显示 "connected to ${HUB}"。
+3. 如果没有连接成功，运行：${connectCmd}
+4. 运行 \`~/.agl/bin/agl agents\`，告诉我检测到了哪些 Agent。`, e.target);
+
+connect();
+</script>
+</body>
+</html>

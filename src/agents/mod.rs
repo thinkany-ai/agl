@@ -1,0 +1,718 @@
+//! Agent drivers: one owned child process per live session.
+//!
+//! Each agent is reached through the best interface it offers:
+//! - `claude`: persistent `claude -p` stream-json (control protocol for
+//!   approvals, interrupt, model listing);
+//! - `codex`: persistent `codex app-server` JSON-RPC (approvals, steer,
+//!   interrupt, model/list);
+//! - ACP agents (gemini, opencode, kimi, grok, …, plus any custom one):
+//!   persistent JSON-RPC Agent Client Protocol;
+//! - one-shot JSON CLIs (cursor-agent, pi): one process per turn with native
+//!   resume.
+//!
+//! A driver turns `prompt` / `steer` / `interrupt` / `respond` calls into the
+//! native protocol and reports [`DriverMsg`]s tagged with its generation so a
+//! late message from a replaced process is recognisable.
+
+mod acp;
+mod claude;
+mod codex;
+mod oneshot;
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{bail, Result};
+use serde_json::{json, Value};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt};
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::config::{self, Config, CustomAgent};
+use crate::protocol::{AgentEvent, AgentInfo};
+use crate::shellenv;
+
+/// Largest JSON frame accepted from an agent; longer lines are dropped.
+pub const MAX_FRAME: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    Claude,
+    Codex,
+    Acp,
+    Cursor,
+    Pi,
+}
+
+impl Protocol {
+    pub fn name(self) -> &'static str {
+        match self {
+            Protocol::Claude => "claude",
+            Protocol::Codex => "codex",
+            Protocol::Acp => "acp",
+            Protocol::Cursor | Protocol::Pi => "oneshot",
+        }
+    }
+
+    pub fn features(self) -> Vec<String> {
+        let f: &[&str] = match self {
+            Protocol::Claude => &["warm", "approvals", "steer", "interrupt", "models", "effort"],
+            Protocol::Codex => &["warm", "approvals", "steer", "interrupt", "models", "effort"],
+            Protocol::Acp => &["warm", "approvals", "interrupt", "models"],
+            Protocol::Cursor | Protocol::Pi => &["resume", "interrupt", "models"],
+        };
+        f.iter().map(|s| s.to_string()).collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentDef {
+    pub id: String,
+    pub name: String,
+    pub protocol: Protocol,
+    /// Executable candidates, first found wins.
+    pub commands: Vec<String>,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+fn def(id: &str, name: &str, protocol: Protocol, commands: &[&str], args: &[&str], env: &[(&str, &str)]) -> AgentDef {
+    AgentDef {
+        id: id.into(),
+        name: name.into(),
+        protocol,
+        commands: commands.iter().map(|s| s.to_string()).collect(),
+        args: args.iter().map(|s| s.to_string()).collect(),
+        env: env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+    }
+}
+
+/// Built-in agents plus `custom_agents` from the config (which may override).
+pub fn registry(cfg: &Config) -> Vec<AgentDef> {
+    use Protocol::*;
+    let mut v = vec![
+        def("claude", "Claude Code", Claude, &["claude"], &[], &[]),
+        def("codex", "Codex", Codex, &["codex"], &[], &[]),
+        def("gemini", "Gemini CLI", Acp, &["gemini"], &["--acp"], &[("GEMINI_CLI_TRUST_WORKSPACE", "true")]),
+        def("opencode", "OpenCode", Acp, &["opencode"], &["acp"], &[]),
+        def("kimi", "Kimi Code", Acp, &["kimi"], &["acp"], &[]),
+        def("grok", "Grok Build", Acp, &["grok"], &["agent", "stdio"], &[]),
+        def("droid", "Factory Droid", Acp, &["droid"], &["exec", "--output-format", "acp-daemon"], &[]),
+        def("openclaw", "OpenClaw", Acp, &["openclaw"], &["acp"], &[]),
+        def("hermes", "Hermes", Acp, &["hermes"], &["acp"], &[]),
+        def("omp", "OMP", Acp, &["omp"], &["acp"], &[]),
+        def("cursor", "Cursor Agent", Cursor, &["cursor-agent"], &[], &[]),
+        def("pi", "Pi", Pi, &["pi"], &[], &[]),
+    ];
+    for c in &cfg.custom_agents {
+        let protocol = match c.protocol.as_str() {
+            "claude" => Claude,
+            "codex" => Codex,
+            _ => Acp,
+        };
+        let d = custom_def(c, protocol);
+        v.retain(|x| x.id != d.id);
+        v.push(d);
+    }
+    v
+}
+
+fn custom_def(c: &CustomAgent, protocol: Protocol) -> AgentDef {
+    AgentDef {
+        id: c.id.clone(),
+        name: c.name.clone().unwrap_or_else(|| c.id.clone()),
+        protocol,
+        commands: vec![c.command.clone()],
+        args: c.args.clone(),
+        env: c.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+    }
+}
+
+pub fn find_def(cfg: &Config, id: &str) -> Option<AgentDef> {
+    registry(cfg).into_iter().find(|d| d.id == id)
+}
+
+/// Locate an agent's executable (`AGL_<ID>_BIN` overrides).
+pub fn find_binary(d: &AgentDef) -> Option<PathBuf> {
+    let env_key = format!("AGL_{}_BIN", d.id.to_uppercase().replace('-', "_"));
+    if let Ok(p) = std::env::var(&env_key) {
+        return Some(PathBuf::from(p));
+    }
+    if let Some(p) = d.commands.iter().find_map(|c| shellenv::which(c)) {
+        return Some(p);
+    }
+    // The Codex engine bundled in the desktop apps.
+    if d.id == "codex" && cfg!(target_os = "macos") {
+        let home = dirs::home_dir().unwrap_or_default();
+        for root in [PathBuf::from("/Applications"), home.join("Applications")] {
+            for app in ["Codex.app", "ChatGPT.app"] {
+                let p = root.join(app).join("Contents/Resources/codex");
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    Allow,
+    AllowSession,
+    Deny,
+}
+
+impl Decision {
+    pub fn parse(s: &str) -> Option<Decision> {
+        match s {
+            "allow" | "allow_once" | "accept" | "yes" => Some(Decision::Allow),
+            "allow_session" | "allow_always" | "always" => Some(Decision::AllowSession),
+            "deny" | "reject" | "decline" | "no" => Some(Decision::Deny),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Decision::Allow => "allow",
+            Decision::AllowSession => "allow_session",
+            Decision::Deny => "deny",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct PermissionAsk {
+    /// Driver-unique key, handed back in `respond`.
+    pub key: String,
+    pub tool: String,
+    pub title: String,
+    pub input: Value,
+    pub options: Vec<String>,
+}
+
+#[derive(Debug)]
+pub enum DriverMsg {
+    Event(AgentEvent),
+    /// The runtime's own conversation id, used to resume after a restart.
+    NativeId(String),
+    Permission(PermissionAsk),
+    /// The runtime withdrew a permission request (turn ended / cancelled).
+    PermissionCancelled(String),
+    TurnDone {
+        outcome: String,
+        error: Option<String>,
+        usage: Option<Value>,
+    },
+    Exited(String),
+}
+
+pub type DriverTx = UnboundedSender<(u64, DriverMsg)>;
+
+#[derive(Debug, Clone)]
+pub struct SpawnSpec {
+    pub def: AgentDef,
+    pub cwd: PathBuf,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// Native conversation id to resume, if any.
+    pub resume: Option<String>,
+    /// full | edit | ask | read_only
+    pub access: String,
+    /// Retry without API-key variables so the CLI uses its own login.
+    pub strip_api_key: bool,
+    pub tool_output_limit: usize,
+    pub generation: u64,
+}
+
+/// A throwaway spec for metadata probes (model lists).
+pub(crate) fn probe_spec(id: &str, protocol: Protocol) -> SpawnSpec {
+    SpawnSpec {
+        def: AgentDef { id: id.into(), name: String::new(), protocol, commands: vec![], args: vec![], env: vec![] },
+        cwd: std::env::temp_dir(),
+        model: None,
+        effort: None,
+        resume: None,
+        access: "read_only".into(),
+        strip_api_key: false,
+        tool_output_limit: 0,
+        generation: 0,
+    }
+}
+
+pub enum Driver {
+    Claude(claude::ClaudeDriver),
+    Codex(codex::CodexDriver),
+    Acp(acp::AcpDriver),
+    OneShot(oneshot::OneShotDriver),
+}
+
+impl Driver {
+    pub async fn spawn(spec: &SpawnSpec, tx: DriverTx) -> Result<Driver> {
+        let Some(bin) = find_binary(&spec.def) else {
+            bail!("agent `{}` is not installed (looked for {} on PATH)", spec.def.id, spec.def.commands.join(", "));
+        };
+        Ok(match spec.def.protocol {
+            Protocol::Claude => Driver::Claude(claude::ClaudeDriver::spawn(&bin, spec, tx).await?),
+            Protocol::Codex => Driver::Codex(codex::CodexDriver::spawn(&bin, spec, tx).await?),
+            Protocol::Acp => Driver::Acp(acp::AcpDriver::spawn(&bin, spec, tx).await?),
+            Protocol::Cursor | Protocol::Pi => Driver::OneShot(oneshot::OneShotDriver::new(bin, spec, tx)),
+        })
+    }
+
+    pub async fn prompt(&mut self, text: &str) -> Result<()> {
+        match self {
+            Driver::Claude(d) => d.prompt(text).await,
+            Driver::Codex(d) => d.prompt(text).await,
+            Driver::Acp(d) => d.prompt(text).await,
+            Driver::OneShot(d) => d.prompt(text).await,
+        }
+    }
+
+    /// Inject input into the running turn. Ok(false) = not supported, queue it.
+    pub async fn steer(&mut self, text: &str) -> Result<bool> {
+        match self {
+            Driver::Claude(d) => d.prompt(text).await.map(|_| true),
+            Driver::Codex(d) => d.steer(text).await.map(|_| true),
+            _ => Ok(false),
+        }
+    }
+
+    pub async fn interrupt(&mut self) -> Result<()> {
+        match self {
+            Driver::Claude(d) => d.interrupt().await,
+            Driver::Codex(d) => d.interrupt().await,
+            Driver::Acp(d) => d.interrupt().await,
+            Driver::OneShot(d) => d.interrupt().await,
+        }
+    }
+
+    pub async fn respond(&mut self, key: &str, decision: Decision) -> Result<()> {
+        match self {
+            Driver::Claude(d) => d.respond(key, decision).await,
+            Driver::Codex(d) => d.respond(key, decision).await,
+            Driver::Acp(d) => d.respond(key, decision).await,
+            Driver::OneShot(_) => Ok(()),
+        }
+    }
+
+    pub async fn shutdown(self) {
+        match self {
+            Driver::Claude(d) => d.shutdown().await,
+            Driver::Codex(d) => d.shutdown().await,
+            Driver::Acp(d) => d.shutdown().await,
+            Driver::OneShot(d) => d.shutdown().await,
+        }
+    }
+}
+
+/// Probe every registered agent concurrently (bounded per probe).
+pub async fn detect(cfg: &Config) -> Vec<AgentInfo> {
+    let defs = registry(cfg);
+    let probes = defs.into_iter().map(|d| async move {
+        let path = find_binary(&d);
+        let version = match &path {
+            Some(p) => version_of(p).await,
+            None => None,
+        };
+        AgentInfo {
+            id: d.id.clone(),
+            name: d.name.clone(),
+            protocol: d.protocol.name().into(),
+            available: path.is_some(),
+            path: path.map(|p| p.display().to_string()),
+            version,
+            features: d.protocol.features(),
+        }
+    });
+    futures_util::future::join_all(probes).await
+}
+
+async fn version_of(p: &std::path::Path) -> Option<String> {
+    let out = run_capture(p, &["--version"], Duration::from_secs(8)).await?;
+    out.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| l.chars().take(160).collect())
+}
+
+/// Run a short command with the agent environment; stdout if it succeeded.
+pub(crate) async fn run_capture(bin: &std::path::Path, args: &[&str], timeout: Duration) -> Option<String> {
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    shellenv::apply(&mut cmd);
+    let out = tokio::time::timeout(timeout, cmd.output()).await.ok()?.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout[..out.stdout.len().min(2 << 20)]).into_owned())
+}
+
+/// Models an agent can run, without starting a conversation.
+pub async fn list_models(cfg: &Config, id: &str) -> Result<Value> {
+    let Some(d) = find_def(cfg, id) else { bail!("unknown agent `{id}`") };
+    let Some(bin) = find_binary(&d) else { bail!("agent `{id}` is not installed") };
+    let models: Vec<Value> = match d.protocol {
+        Protocol::Claude => claude::list_models(&bin).await,
+        Protocol::Codex => codex::list_models(&bin).await?,
+        Protocol::Acp => acp::list_models(&bin, &d).await?,
+        _ => {
+            let (args, parse): (&[&str], fn(&str) -> Option<Value>) = match d.id.as_str() {
+                "opencode" => (&["models"], |l| {
+                    (l.contains('/') && !l.contains(char::is_whitespace)).then(|| json!({"id": l, "name": l}))
+                }),
+                "cursor" => (&["models"], |l| {
+                    let (id, name) = l.split_once(" - ")?;
+                    let id = id.trim();
+                    (!id.is_empty() && !id.contains(' ')).then(|| json!({"id": id, "name": name.trim()}))
+                }),
+                "grok" => (&["models"], |l| {
+                    let id = l.trim().strip_prefix("* ").or(l.trim().strip_prefix("- "))?;
+                    let id = id.split_whitespace().next()?;
+                    Some(json!({"id": id, "name": id}))
+                }),
+                _ => (&[], |_| None),
+            };
+            if args.is_empty() {
+                vec![]
+            } else {
+                let out = run_capture(&bin, args, Duration::from_secs(15)).await.unwrap_or_default();
+                out.lines().map(str::trim).filter_map(parse).take(200).collect()
+            }
+        }
+    };
+    Ok(json!({"agent": id, "models": models}))
+}
+
+/// Read one newline-terminated frame, bounded by `max`. Oversized frames are
+/// skipped whole. Ok(None) at EOF.
+pub(crate) async fn next_frame<R: AsyncBufRead + Unpin>(r: &mut R, max: usize) -> std::io::Result<Option<Vec<u8>>> {
+    let mut out = Vec::new();
+    let mut overflow = false;
+    loop {
+        let buf = r.fill_buf().await?;
+        if buf.is_empty() {
+            return Ok(if out.is_empty() { None } else { Some(out) });
+        }
+        if let Some(i) = buf.iter().position(|&b| b == b'\n') {
+            if !overflow {
+                out.extend_from_slice(&buf[..i]);
+            }
+            r.consume(i + 1);
+            if overflow {
+                eprintln!("agl: dropped an agent frame larger than {max} bytes");
+                overflow = false;
+                out.clear();
+                continue;
+            }
+            return Ok(Some(out));
+        }
+        let n = buf.len();
+        if !overflow {
+            if out.len() + n > max {
+                overflow = true;
+                out.clear();
+            } else {
+                out.extend_from_slice(buf);
+            }
+        }
+        r.consume(n);
+    }
+}
+
+/// Spawn a JSON-lines reader: each parsed frame goes to `on_frame`; EOF ends it.
+pub(crate) fn spawn_frame_reader<R, F>(stdout: R, mut on_frame: F) -> tokio::task::JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    F: FnMut(Value) + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut r = tokio::io::BufReader::with_capacity(64 * 1024, stdout);
+        while let Ok(Some(line)) = next_frame(&mut r, MAX_FRAME).await {
+            if let Ok(v) = serde_json::from_slice::<Value>(&line) {
+                on_frame(v);
+            }
+        }
+    })
+}
+
+/// Common process setup: agent env, own process group, piped stdio.
+pub(crate) fn base_command(bin: &std::path::Path, spec: &SpawnSpec) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(bin);
+    shellenv::apply(&mut cmd);
+    // A daemon started from inside Claude Code inherits its session markers.
+    for (k, _) in std::env::vars() {
+        if k == "CLAUDECODE" || k == "CLAUDE_PID" || k.starts_with("CLAUDE_CODE_") && k != "CLAUDE_CODE_OAUTH_TOKEN" {
+            cmd.env_remove(k);
+        }
+    }
+    if spec.strip_api_key {
+        for k in API_KEY_VARS {
+            cmd.env_remove(k);
+        }
+    }
+    for (k, v) in &spec.def.env {
+        cmd.env(k, v);
+    }
+    cmd.current_dir(&spec.cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd
+}
+
+/// Variables that make Claude Code prefer an API key over the user's login.
+pub const API_KEY_VARS: &[&str] = &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"];
+
+/// Stop an agent and every process it started: SIGTERM the group, then
+/// SIGKILL after a grace period (taskkill /T /F on Windows).
+pub(crate) async fn kill_tree(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        #[cfg(unix)]
+        {
+            // Tool commands (claude Bash, codex exec) run in their own sessions
+            // and escape the group, so collect the whole tree first.
+            let tree = descendants(pid);
+            let pgid = -(pid as i32);
+            // SAFETY: kill(2) on the process group we created and its descendants.
+            unsafe { libc::kill(pgid, libc::SIGTERM) };
+            for p in &tree {
+                unsafe { libc::kill(*p as i32, libc::SIGTERM) };
+            }
+            let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            unsafe { libc::kill(pgid, libc::SIGKILL) };
+            for p in &tree {
+                unsafe { libc::kill(*p as i32, libc::SIGKILL) };
+            }
+        }
+        #[cfg(windows)]
+        {
+            let _ = tokio::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .output()
+                .await;
+        }
+        untrack(pid);
+    }
+    let _ = child.kill().await;
+}
+
+/// All descendants of `root` from the process table.
+#[cfg(unix)]
+fn descendants(root: u32) -> Vec<u32> {
+    let Ok(out) = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid="]).output() else { return vec![] };
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut it = line.split_whitespace().filter_map(|x| x.parse::<u32>().ok());
+        if let (Some(pid), Some(ppid)) = (it.next(), it.next()) {
+            children.entry(ppid).or_default().push(pid);
+        }
+    }
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(p) = stack.pop() {
+        for c in children.get(&p).into_iter().flatten() {
+            out.push(*c);
+            stack.push(*c);
+        }
+    }
+    out
+}
+
+/// Keep the last lines of a child's stderr for error reports.
+pub(crate) fn spawn_stderr_tail(stderr: tokio::process::ChildStderr) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let tail = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let t = tail.clone();
+    tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let line = strip_ansi(&line);
+            if line.trim().is_empty() {
+                continue;
+            }
+            let mut v = t.lock().unwrap();
+            v.push(line.chars().take(400).collect());
+            if v.len() > 12 {
+                v.remove(0);
+            }
+        }
+    });
+    tail
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\x1b' {
+            if it.peek() == Some(&'[') {
+                it.next();
+                for c in it.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Keep tool output small enough for an event stream.
+pub(crate) fn clip(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}… [{} bytes truncated]", &s[..end], s.len() - end)
+}
+
+// --- orphan tracking -------------------------------------------------------
+//
+// Every agent process group is recorded with a fingerprint (start time +
+// command line). A daemon that crashed leaves them behind; the next daemon
+// kills the ones whose fingerprint still matches, and never touches a reused
+// pid.
+
+fn pid_dir() -> PathBuf {
+    config::home().join("pids")
+}
+
+fn fingerprint(pid: u32) -> Option<String> {
+    let out = std::process::Command::new("ps").args(["-o", "lstart=,command=", "-p", &pid.to_string()]).output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+pub(crate) fn track(pid: u32) {
+    if cfg!(windows) {
+        return;
+    }
+    if let Some(fp) = fingerprint(pid) {
+        let _ = std::fs::create_dir_all(pid_dir());
+        let _ = std::fs::write(pid_dir().join(pid.to_string()), fp);
+    }
+}
+
+pub(crate) fn untrack(pid: u32) {
+    let _ = std::fs::remove_file(pid_dir().join(pid.to_string()));
+}
+
+/// Kill agent process groups left by a daemon that did not exit cleanly.
+pub fn reap_orphans() -> usize {
+    let Ok(rd) = std::fs::read_dir(pid_dir()) else { return 0 };
+    let mut n = 0;
+    for e in rd.flatten() {
+        let path = e.path();
+        let pid: Option<u32> = path.file_name().and_then(|f| f.to_str()).and_then(|f| f.parse().ok());
+        if let (Some(pid), Ok(saved)) = (pid, std::fs::read_to_string(&path)) {
+            if fingerprint(pid).as_deref() == Some(saved.trim()) {
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGKILL);
+                }
+                n += 1;
+            }
+        }
+        let _ = std::fs::remove_file(path);
+    }
+    n
+}
+
+/// A JSON-RPC 2.0 peer over a child's stdio, shared by codex and ACP.
+pub(crate) mod rpc {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
+    use tokio::io::AsyncWriteExt;
+    use tokio::process::ChildStdin;
+    use tokio::sync::{oneshot, Mutex as AsyncMutex};
+
+    pub type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
+
+    #[derive(Clone)]
+    pub struct Peer {
+        pub stdin: Arc<AsyncMutex<ChildStdin>>,
+        pub pending: Pending,
+        next_id: Arc<AtomicU64>,
+        pub name: &'static str,
+    }
+
+    impl Peer {
+        pub fn new(stdin: ChildStdin, name: &'static str) -> Peer {
+            Peer { stdin: Arc::new(AsyncMutex::new(stdin)), pending: Arc::default(), next_id: Arc::new(AtomicU64::new(1)), name }
+        }
+
+        pub async fn write(&self, v: &Value) -> Result<()> {
+            let mut w = self.stdin.lock().await;
+            w.write_all(format!("{v}\n").as_bytes()).await?;
+            w.flush().await?;
+            Ok(())
+        }
+
+        pub async fn notify(&self, method: &str, params: Value) -> Result<()> {
+            self.write(&json!({"jsonrpc": "2.0", "method": method, "params": params})).await
+        }
+
+        pub async fn reply(&self, id: &Value, result: Value) -> Result<()> {
+            self.write(&json!({"jsonrpc": "2.0", "id": id, "result": result})).await
+        }
+
+        pub async fn reply_error(&self, id: &Value, code: i64, message: &str) -> Result<()> {
+            self.write(&json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})).await
+        }
+
+        /// Request with an acknowledgement deadline (not a turn deadline).
+        pub async fn request(&self, method: &str, params: Value, timeout: Duration) -> Result<Value> {
+            let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = oneshot::channel();
+            self.pending.lock().unwrap().insert(id, tx);
+            if let Err(e) = self.write(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})).await {
+                self.pending.lock().unwrap().remove(&id);
+                return Err(e);
+            }
+            match tokio::time::timeout(timeout, rx).await {
+                Ok(Ok(Ok(v))) => Ok(v),
+                Ok(Ok(Err(e))) => bail!("{} {method}: {e}", self.name),
+                Ok(Err(_)) => bail!("{} {method}: process exited", self.name),
+                Err(_) => {
+                    self.pending.lock().unwrap().remove(&id);
+                    bail!("{} did not acknowledge {method} within {}s", self.name, timeout.as_secs())
+                }
+            }
+        }
+
+        /// Route a reply frame to its waiter. Returns false if `v` is not a reply.
+        pub fn route_reply(&self, v: &Value) -> bool {
+            if v.get("method").is_some() || v.get("id").is_none() {
+                return false;
+            }
+            if let Some(tx) = v["id"].as_u64().and_then(|id| self.pending.lock().unwrap().remove(&id)) {
+                let res = match v.get("error") {
+                    Some(e) if !e.is_null() => Err(e["message"].as_str().unwrap_or("rpc error").to_string()),
+                    _ => Ok(v["result"].clone()),
+                };
+                let _ = tx.send(res);
+            }
+            true
+        }
+
+        pub fn fail_all(&self) {
+            for (_, p) in self.pending.lock().unwrap().drain() {
+                let _ = p.send(Err("process exited".into()));
+            }
+        }
+    }
+}

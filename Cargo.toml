@@ -1,0 +1,31 @@
+[package]
+name = "agl"
+version = "0.1.0"
+edition = "2021"
+description = "AgentLink: drive local coding agents (Claude Code, Codex) from the CLI or a remote web app"
+license = "MIT"
+repository = "https://github.com/thinkany-ai/agl"
+homepage = "https://github.com/thinkany-ai/agl"
+readme = "README.md"
+keywords = ["agent", "claude-code", "codex", "acp", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+libc = "0.2"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1

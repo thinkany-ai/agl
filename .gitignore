@@ -1,0 +1,22 @@
+# Rust build output
+/target
+**/*.rs.bk
+
+# Prebuilt binaries served by `agl hub --dist`
+/dist
+
+# Local agl state when AGL_HOME points inside the repo
+/.agl
+
+# Node / TypeScript scratch
+node_modules/
+*.tsbuildinfo
+
+# Editors, OS, local agent settings
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.claude/settings.local.json
+.env
+.env.*
