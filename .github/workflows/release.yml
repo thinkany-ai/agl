@@ -20,7 +20,7 @@ jobs:
           - { name: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, musl: true }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -37,7 +37,7 @@ jobs:
           if command -v sha256sum >/dev/null; then sha256sum agl-${{ matrix.name }} | awk '{print $1}' > agl-${{ matrix.name }}.sha256
           else shasum -a 256 agl-${{ matrix.name }} | awk '{print $1}' > agl-${{ matrix.name }}.sha256; fi
           ./agl-${{ matrix.name }} --version
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: agl-${{ matrix.name }}
           path: dist/*
@@ -46,14 +46,14 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
       - name: Add the installer
         run: cp assets/install.sh dist/install.sh
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true
