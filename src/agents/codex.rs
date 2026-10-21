@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use tokio::process::Child;
 
 use super::rpc::Peer;
-use super::{base_command, clip, kill_tree, split_content, spawn_frame_reader, spawn_stderr_tail, track, Decision, DriverMsg, DriverTx, PermissionAsk, SpawnSpec};
+use super::{base64_image, base_command, clip, file_image, kill_tree, split_content, spawn_frame_reader, spawn_stderr_tail, track, Decision, DriverMsg, DriverTx, PermissionAsk, SpawnSpec};
 use crate::protocol::AgentEvent;
 
 const ACK: Duration = Duration::from_secs(60);
@@ -52,7 +52,7 @@ pub struct CodexDriver {
     thread_id: String,
 }
 
-const TOOL_ITEMS: &[&str] = &["commandExecution", "fileChange", "mcpToolCall", "webSearch", "dynamicToolCall", "imageView"];
+const TOOL_ITEMS: &[&str] = &["commandExecution", "fileChange", "mcpToolCall", "webSearch", "dynamicToolCall", "imageView", "imageGeneration"];
 
 /// The text output of a built-in (non-MCP) tool item.
 fn tool_text(ty: &str, item: &Value, status: &str) -> String {
@@ -360,6 +360,7 @@ fn map_notification(method: &str, p: &Value, state: &Arc<Mutex<TurnState>>) -> V
                     format!("{}.{}", item["namespace"].as_str().unwrap_or("tool"), item["tool"].as_str().unwrap_or("call")),
                     item["arguments"].clone(),
                 ),
+                "imageGeneration" => ("image_generation".to_string(), json!({"prompt": item["revisedPrompt"]})),
                 _ => (ty.to_string(), item.clone()),
             };
             ev(AgentEvent::ToolStart { call_id: item["id"].as_str().unwrap_or_default().into(), name, input })
@@ -383,11 +384,32 @@ fn map_notification(method: &str, p: &Value, state: &Arc<Mutex<TurnState>>) -> V
                     };
                     (text, images)
                 }
+                // The generated image comes inline; codex also saves it to disk.
+                "imageGeneration" => {
+                    let saved = item["savedPath"].as_str();
+                    let image = item["result"]
+                        .as_str()
+                        .and_then(base64_image)
+                        .or_else(|| saved.and_then(|p| file_image(Path::new(p))));
+                    let text = match item["failure"]["type"].as_str() {
+                        Some(failure) => failure.to_string(),
+                        None => saved.or(item["revisedPrompt"].as_str()).unwrap_or(status).to_string(),
+                    };
+                    (text, image.into_iter().collect())
+                }
+                "imageView" => {
+                    let path = item["path"].as_str().unwrap_or_default();
+                    (path.to_string(), file_image(Path::new(path)).into_iter().collect())
+                }
                 _ => (tool_text(ty, item, status), Vec::new()),
+            };
+            let ok = match ty {
+                "imageGeneration" => item["failure"].is_null() && status != "failed",
+                _ => status == "completed" && exit_ok,
             };
             ev(AgentEvent::ToolEnd {
                 call_id: item["id"].as_str().unwrap_or_default().into(),
-                ok: status == "completed" && exit_ok,
+                ok,
                 output: clip(&output, s.limit),
                 images,
             })
@@ -514,6 +536,30 @@ mod tests {
 
         let end = map_notification("turn/completed", &json!({"threadId": "t1", "turn": {"status": "interrupted"}}), &s);
         assert!(matches!(&end[0], DriverMsg::TurnDone { outcome, .. } if outcome == "aborted"));
+    }
+
+    #[test]
+    fn returns_generated_and_viewed_images() {
+        let s = state();
+        let item = json!({"type": "imageGeneration", "id": "ig1", "status": "generating", "result": ""});
+        let ev = events(map_notification("item/started", &json!({"threadId": "t1", "item": item}), &s));
+        assert!(matches!(&ev[0], AgentEvent::ToolStart { name, call_id, .. } if name == "image_generation" && call_id == "ig1"));
+
+        let done = json!({"type": "imageGeneration", "id": "ig1", "status": "completed", "result": "aGk=", "revisedPrompt": "a cat", "savedPath": "/tmp/x.png"});
+        let ev = events(map_notification("item/completed", &json!({"threadId": "t1", "item": done}), &s));
+        assert!(matches!(&ev[0], AgentEvent::ToolEnd { ok: true, output, images, .. }
+            if output == "/tmp/x.png" && images.len() == 1 && images[0].data == "aGk=" && images[0].mime_type == "image/png"));
+
+        let failed = json!({"type": "imageGeneration", "id": "ig2", "status": "completed", "result": "", "failure": {"type": "usageLimitExceeded", "limitId": "l"}});
+        let ev = events(map_notification("item/completed", &json!({"threadId": "t1", "item": failed}), &s));
+        assert!(matches!(&ev[0], AgentEvent::ToolEnd { ok: false, output, images, .. } if output == "usageLimitExceeded" && images.is_empty()));
+
+        let path = std::env::temp_dir().join(format!("agl-view-{}.png", std::process::id()));
+        std::fs::write(&path, b"hi").unwrap();
+        let view = json!({"type": "imageView", "id": "iv1", "path": path});
+        let ev = events(map_notification("item/completed", &json!({"threadId": "t1", "item": view}), &s));
+        std::fs::remove_file(&path).ok();
+        assert!(matches!(&ev[0], AgentEvent::ToolEnd { ok: true, images, .. } if images.len() == 1 && images[0].data == "aGk="));
     }
 
     #[test]

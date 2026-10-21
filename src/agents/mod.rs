@@ -20,7 +20,7 @@ mod codex;
 mod oneshot;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -638,10 +638,45 @@ fn image_block(o: &serde_json::Map<String, Value>) -> Option<ToolImage> {
         let (head, data) = url.strip_prefix("data:")?.split_once(";base64,")?;
         (head.to_string(), data.to_string())
     };
+    Some(tool_image(mime_type, data))
+}
+
+fn tool_image(mime_type: String, data: String) -> ToolImage {
     if data.len() > MAX_IMAGE_BYTES {
-        return Some(ToolImage { mime_type, data: String::new(), omitted: true });
+        return ToolImage { mime_type, data: String::new(), omitted: true };
     }
-    Some(ToolImage { mime_type, data, omitted: false })
+    ToolImage { mime_type, data, omitted: false }
+}
+
+/// An image from base64 data or a `data:` URL; bare data is taken as PNG.
+pub(crate) fn base64_image(data: &str) -> Option<ToolImage> {
+    if data.is_empty() {
+        return None;
+    }
+    let (mime, data) = match data.strip_prefix("data:").and_then(|d| d.split_once(";base64,")) {
+        Some((mime, data)) => (mime, data),
+        None => ("image/png", data),
+    };
+    Some(tool_image(mime.to_string(), data.to_string()))
+}
+
+/// An image file the agent wrote or viewed, read from disk.
+pub(crate) fn file_image(path: &Path) -> Option<ToolImage> {
+    use base64::Engine as _;
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => return None,
+    };
+    // Skip reading what would be omitted anyway (base64 grows data by 4/3).
+    if std::fs::metadata(path).ok()?.len() as usize > MAX_IMAGE_BYTES / 4 * 3 {
+        return Some(ToolImage { mime_type: mime.into(), data: String::new(), omitted: true });
+    }
+    let bytes = std::fs::read(path).ok()?;
+    Some(tool_image(mime.into(), base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
 /// Keep tool output small enough for an event stream.
