@@ -318,3 +318,32 @@ pub async fn list_models(bin: &Path) -> Vec<Value> {
         _ => fallback(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_stream_json() {
+        let mut s = State { wrote_text: false, limit: 1024 };
+        let delta = json!({"type": "stream_event", "parent_tool_use_id": null, "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "hi"}}});
+        assert!(matches!(&s.map(&delta)[0], DriverMsg::Event(AgentEvent::TextDelta { text }) if text == "hi"));
+
+        let child = json!({"type": "stream_event", "parent_tool_use_id": "tu9", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "sub"}}});
+        assert!(s.map(&child).is_empty(), "subagent text is not the main transcript");
+
+        let tool = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "tu1", "name": "TodoWrite", "input": {"todos": [{"content": "a"}]}}]}});
+        let out = s.map(&tool);
+        assert!(matches!(&out[0], DriverMsg::Event(AgentEvent::Plan { .. })));
+        assert!(matches!(&out[1], DriverMsg::Event(AgentEvent::ToolStart { name, .. }) if name == "TodoWrite"));
+
+        let result = json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tu1", "is_error": true, "content": "nope"}]}});
+        assert!(matches!(&s.map(&result)[0], DriverMsg::Event(AgentEvent::ToolEnd { ok: false, output, .. }) if output == "nope"));
+
+        let retry = json!({"type": "system", "subtype": "api_retry", "error": "overloaded"});
+        assert!(matches!(&s.map(&retry)[0], DriverMsg::Event(AgentEvent::Retrying { .. })));
+
+        let failed = json!({"type": "result", "is_error": true, "result": "Credit balance is too low"});
+        assert!(matches!(&s.map(&failed)[0], DriverMsg::TurnDone { outcome, error: Some(e), .. } if outcome == "failed" && e.contains("Credit")));
+    }
+}

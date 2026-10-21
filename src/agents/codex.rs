@@ -469,3 +469,62 @@ pub async fn list_models(bin: &Path) -> Result<Vec<Value>> {
     kill_tree(&mut child).await;
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> Arc<Mutex<TurnState>> {
+        Arc::new(Mutex::new(TurnState { thread_id: Some("t1".into()), limit: 1024, ..Default::default() }))
+    }
+
+    fn events(msgs: Vec<DriverMsg>) -> Vec<AgentEvent> {
+        msgs.into_iter().filter_map(|m| if let DriverMsg::Event(e) = m { Some(e) } else { None }).collect()
+    }
+
+    #[test]
+    fn maps_a_turn() {
+        let s = state();
+        let ev = events(map_notification("item/agentMessage/delta", &json!({"threadId": "t1", "delta": "hi"}), &s));
+        assert!(matches!(&ev[0], AgentEvent::TextDelta { text } if text == "hi"));
+
+        let item = json!({"type": "commandExecution", "id": "c1", "command": "ls", "cwd": "/", "status": "inProgress"});
+        let ev = events(map_notification("item/started", &json!({"threadId": "t1", "item": item}), &s));
+        assert!(matches!(&ev[0], AgentEvent::ToolStart { name, call_id, .. } if name == "shell" && call_id == "c1"));
+
+        let done = json!({"type": "commandExecution", "id": "c1", "status": "completed", "exitCode": 1, "aggregatedOutput": "boom"});
+        let ev = events(map_notification("item/completed", &json!({"threadId": "t1", "item": done}), &s));
+        assert!(matches!(&ev[0], AgentEvent::ToolEnd { ok: false, output, .. } if output == "boom"), "non-zero exit is a failure");
+
+        map_notification("thread/tokenUsage/updated", &json!({"threadId": "t1", "tokenUsage": {"total": 5}}), &s);
+        let end = map_notification("turn/completed", &json!({"threadId": "t1", "turn": {"id": "u1", "status": "completed"}}), &s);
+        assert!(matches!(&end[0], DriverMsg::TurnDone { outcome, usage: Some(_), .. } if outcome == "completed"));
+    }
+
+    #[test]
+    fn ignores_child_threads_and_maps_failures() {
+        let s = state();
+        assert!(map_notification("item/agentMessage/delta", &json!({"threadId": "child", "delta": "x"}), &s).is_empty());
+
+        let retry = events(map_notification("error", &json!({"threadId": "t1", "error": {"message": "429"}, "willRetry": true}), &s));
+        assert!(matches!(&retry[0], AgentEvent::Retrying { .. }));
+        map_notification("error", &json!({"threadId": "t1", "error": {"message": "quota"}}), &s);
+        let end = map_notification("turn/completed", &json!({"threadId": "t1", "turn": {"status": "failed"}}), &s);
+        assert!(matches!(&end[0], DriverMsg::TurnDone { outcome, error: Some(e), .. } if outcome == "failed" && e == "quota"));
+
+        let end = map_notification("turn/completed", &json!({"threadId": "t1", "turn": {"status": "interrupted"}}), &s);
+        assert!(matches!(&end[0], DriverMsg::TurnDone { outcome, .. } if outcome == "aborted"));
+    }
+
+    #[test]
+    fn access_maps_to_sandbox_and_approvals() {
+        let mut spec = super::super::probe_spec("codex", super::super::Protocol::Codex);
+        for (access, sandbox, policy) in [("full", "danger-full-access", "never"), ("edit", "workspace-write", "on-request"), ("ask", "workspace-write", "untrusted"), ("read_only", "read-only", "never")] {
+            spec.access = access.into();
+            let p = thread_params(&spec);
+            assert_eq!((p["sandbox"].as_str(), p["approvalPolicy"].as_str()), (Some(sandbox), Some(policy)), "{access}");
+        }
+        spec.model = Some("gpt-x".into());
+        assert_eq!(thread_params(&spec)["model"], "gpt-x", "the model is always repeated");
+    }
+}

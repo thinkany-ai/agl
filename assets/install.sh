@@ -1,13 +1,20 @@
 #!/bin/sh
-# AgentLink installer: downloads agl, verifies it, links this machine to the
-# hub with a one-time pairing code and installs autostart. Served by the hub
-# with its URL and the pairing arguments filled in.
+# AgentLink installer: downloads agl and verifies its checksum.
+#
+# Served by a hub (with its URL and a one-time pairing code filled in), it
+# also installs autostart and links this machine to the hub. Downloaded from
+# GitHub Releases as is, it only installs agl:
+#   curl -fsSL https://github.com/thinkany-ai/agl/releases/latest/download/install.sh | sh
 set -eu
 umask 077
 
 HUB_URL="${AGL_HUB_URL:-__HUB_URL__}"
 CONNECT_ARGS="${AGL_CONNECT_ARGS:-__CONNECT_ARGS__}"
 INSTALL_DIR="${AGL_INSTALL_DIR:-$HOME/.agl/bin}"
+RELEASES="${AGL_RELEASES_URL:-https://github.com/thinkany-ai/agl/releases/latest/download}"
+# Spelled in pieces so a hub filling in the placeholders leaves these alone.
+[ "$HUB_URL" = "__HUB""_URL__" ] && HUB_URL=""
+[ "$CONNECT_ARGS" = "__CONNECT""_ARGS__" ] && CONNECT_ARGS=""
 
 say() { printf '\033[1m%s\033[0m\n' "$*"; }
 fail() { printf '\033[31magl:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -17,7 +24,7 @@ if [ "$(id -u)" = "0" ] && [ "${AGL_ALLOW_ROOT:-}" != "1" ]; then
 fi
 HUB_URL="${HUB_URL%/}"
 case "$HUB_URL" in
-  https://*) ;;
+  ""|https://*) ;;
   http://localhost|http://localhost[:/]*|http://127.0.0.1|http://127.0.0.1[:/]*|http://\[::1\]|http://\[::1\][:/]*) ;;
   *) [ "${AGL_ALLOW_HTTP:-}" = "1" ] || fail "the hub address must use HTTPS: $HUB_URL (AGL_ALLOW_HTTP=1 overrides)" ;;
 esac
@@ -39,7 +46,9 @@ say "Installing agl ($target) into $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 tmp="$(mktemp "$INSTALL_DIR/.agl.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT INT TERM
-url="${AGL_DOWNLOAD_URL:-$HUB_URL/download/$target}"
+if [ -n "${AGL_DOWNLOAD_URL:-}" ]; then url="$AGL_DOWNLOAD_URL"
+elif [ -n "$HUB_URL" ]; then url="$HUB_URL/download/$target"
+else url="$RELEASES/agl-$target"; fi
 curl -fL --retry 3 --connect-timeout 20 --progress-bar "$url" -o "$tmp" || fail "download failed: $url"
 
 # Verify the checksum the hub publishes next to the binary.
@@ -49,7 +58,7 @@ if [ -n "$want" ]; then
   else got="$(sha256sum "$tmp" | awk '{print $1}')"; fi
   [ "$got" = "$want" ] || fail "checksum mismatch for $url"
 elif [ -z "${AGL_DOWNLOAD_URL:-}" ]; then
-  fail "the hub did not publish a checksum for $target"
+  fail "no checksum published for $url"
 fi
 chmod 755 "$tmp"
 "$tmp" --version >/dev/null 2>&1 || fail "the downloaded binary does not run on this machine"
@@ -73,6 +82,13 @@ fi
 esac
 
 "$INSTALL_DIR/agl" agents || true
+
+if [ -z "$HUB_URL" ]; then
+  say "agl installed: $INSTALL_DIR/agl"
+  echo "  agl run claude \"hello\"                     # the daemon starts on first use"
+  echo "  agl connect <hub url> --code <pairing code>  # link this machine to a web app"
+  exit 0
+fi
 
 say "Linking this machine to $HUB_URL"
 # Autostart first so the linked daemon survives logout/reboot; fall back to a

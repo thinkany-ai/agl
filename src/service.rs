@@ -69,12 +69,14 @@ pub fn install() -> Result<()> {
         }
     } else {
         let unit = format!(
-            "[Unit]\nDescription=AgentLink daemon\nAfter=network-online.target\n\n[Service]\nExecStart={exe} daemon\nEnvironment=PATH={path_env}\nRestart=always\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n",
+            "[Unit]\nDescription=AgentLink daemon\nAfter=network-online.target\n\n[Service]\nExecStart={exe} daemon\nEnvironment=PATH={path_env}\nRestart=always\nRestartSec=3\nStandardOutput=append:{log}\nStandardError=append:{log}\n\n[Install]\nWantedBy=default.target\n",
             exe = exe.display(),
+            log = log.display(),
         );
         std::fs::write(&path, unit)?;
-        let ok = Command::new("systemctl").args(["--user", "daemon-reload"]).status().map(|s| s.success()).unwrap_or(false)
-            && Command::new("systemctl").args(["--user", "enable", "--now", "agl.service"]).status().map(|s| s.success()).unwrap_or(false);
+        let systemctl = |args: &[&str]| Command::new("systemctl").arg("--user").args(args).status().map(|s| s.success()).unwrap_or(false);
+        // `restart` also replaces a running instance (a reinstall or upgrade).
+        let ok = systemctl(&["daemon-reload"]) && systemctl(&["enable", "agl.service"]) && systemctl(&["restart", "agl.service"]);
         if !ok {
             let _ = std::fs::remove_file(&path);
             bail!("systemctl --user is unavailable; run `agl start` instead");

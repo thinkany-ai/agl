@@ -30,13 +30,15 @@ struct State {
     limit: usize,
 }
 
+/// Pending permission requests: key -> (rpc id, offered options).
+type Approvals = Arc<Mutex<HashMap<String, (Value, Vec<Value>)>>>;
+
 pub struct AcpDriver {
     child: Child,
     peer: Peer,
     session_id: String,
     state: Arc<Mutex<State>>,
-    /// Pending permission requests: key -> (rpc id, options).
-    approvals: Arc<Mutex<HashMap<String, (Value, Vec<Value>)>>>,
+    approvals: Approvals,
     tx: DriverTx,
     generation: u64,
     name: String,
@@ -64,7 +66,7 @@ impl AcpDriver {
         let stdout = child.stdout.take().unwrap();
         let tail = spawn_stderr_tail(child.stderr.take().unwrap());
         let state = Arc::new(Mutex::new(State { limit: spec.tool_output_limit, ..Default::default() }));
-        let approvals: Arc<Mutex<HashMap<String, (Value, Vec<Value>)>>> = Arc::default();
+        let approvals: Approvals = Arc::default();
 
         let gen = spec.generation;
         let (p, st, ap, t2) = (peer.clone(), state.clone(), approvals.clone(), tx.clone());
@@ -210,12 +212,13 @@ impl AcpDriver {
                 .flatten()
                 .find(|o| o["category"] == "model")
                 .and_then(|o| o["id"].as_str().map(String::from));
-            let res = match config_id {
-                Some(cid) => {
-                    self.peer.request("session/set_config_option", json!({"sessionId": self.session_id, "configId": cid, "value": m}), ACK).await
-                }
-                None => self.peer.request("session/set_model", json!({"sessionId": self.session_id, "modelId": m}), ACK).await,
-            };
+            // A resume reply may omit configOptions: try the standard config
+            // option first, then the older set_model.
+            let cid = config_id.unwrap_or_else(|| "model".into());
+            let mut res = self.peer.request("session/set_config_option", json!({"sessionId": self.session_id, "configId": cid, "value": m}), ACK).await;
+            if res.is_err() && (opened["models"].is_object() || spec.resume.is_some()) {
+                res = self.peer.request("session/set_model", json!({"sessionId": self.session_id, "modelId": m}), ACK).await;
+            }
             if let Err(e) = res {
                 bail!("{} rejected model `{m}`: {e:#}", self.name);
             }
@@ -453,4 +456,45 @@ pub async fn list_models(bin: &Path, def: &super::AgentDef) -> Result<Vec<Value>
     reader.abort();
     kill_tree(&mut child).await;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_session_updates() {
+        let s = Arc::new(Mutex::new(State { live: true, limit: 1024, ..Default::default() }));
+        let text = map_update(&json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hi"}}), &s);
+        assert!(matches!(&text[0], DriverMsg::Event(AgentEvent::TextDelta { text }) if text == "hi"));
+
+        let start = map_update(&json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Bash", "rawInput": {"command": "ls"}}), &s);
+        assert!(start.iter().any(|m| matches!(m, DriverMsg::Event(AgentEvent::ToolStart { call_id, .. }) if call_id == "t1")));
+        assert!(map_update(&json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "in_progress"}), &s).is_empty());
+        let end = map_update(&json!({"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "failed",
+            "content": [{"type": "content", "content": {"type": "text", "text": "denied"}}]}), &s);
+        assert!(matches!(&end[0], DriverMsg::Event(AgentEvent::ToolEnd { ok: false, output, .. }) if output == "denied"));
+
+        s.lock().unwrap().live = false;
+        assert!(map_update(&json!({"sessionUpdate": "agent_message_chunk", "content": {"text": "replayed"}}), &s).is_empty(), "history replay is skipped");
+    }
+
+    #[test]
+    fn reads_models_and_modes() {
+        let opened = json!({"configOptions": [{"id": "model", "category": "model", "currentValue": "k3",
+            "options": [{"value": "k3", "name": "K3"}, {"name": "group", "options": [{"value": "k2", "name": "K2"}]}]}]});
+        let models = models_of(&opened);
+        assert_eq!(models.len(), 2);
+        assert_eq!(current_model(&opened).as_deref(), Some("k3"));
+        let gemini = json!({"models": {"currentModelId": "auto", "availableModels": [{"modelId": "auto", "name": "Auto"}]}});
+        assert_eq!(models_of(&gemini)[0]["id"], "auto");
+        assert_eq!(modes_for("full")[0], "yolo");
+        assert_eq!(modes_for("read_only")[0], "plan");
+    }
+
+    #[test]
+    fn cleans_provider_errors() {
+        let raw = r#"Internal error: {"error":{"message":"Permission denied: project suspended","code":403}}"#;
+        assert_eq!(clean_error(raw), "Permission denied: project suspended");
+    }
 }

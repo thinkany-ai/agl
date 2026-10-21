@@ -136,7 +136,7 @@ enum Cmd {
     Stop,
     /// Show daemon and hub link status
     Status,
-    /// Link this machine to a hub (web app) and keep it connected
+    /// Link this machine to a hub (web app); several hubs can be linked
     Connect {
         /// Hub URL, e.g. https://hub.example.com
         url: String,
@@ -149,9 +149,19 @@ enum Cmd {
         /// Display name on the hub (defaults to hostname)
         #[arg(long)]
         name: Option<String>,
+        /// Access for sessions this hub creates without naming one (default: ask)
+        #[arg(long)]
+        access: Option<String>,
+        /// Do not let this hub see sessions started locally
+        #[arg(long)]
+        private: bool,
     },
-    /// Unlink this machine from the hub
-    Disconnect,
+    /// Unlink this machine from a hub (the only one, or the named one)
+    Disconnect {
+        url: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
     /// Manage autostart (launchd on macOS, systemd --user on Linux)
     Service {
         #[command(subcommand)]
@@ -170,6 +180,9 @@ enum Cmd {
         /// Directory with prebuilt binaries named agl-<os>-<arch> (e.g. agl-linux-x64)
         #[arg(long)]
         dist: Option<PathBuf>,
+        /// Redirect downloads not found in --dist here ("" to disable)
+        #[arg(long, default_value = hub::DEFAULT_RELEASE_URL)]
+        release_url: String,
     },
 }
 
@@ -193,7 +206,7 @@ async fn real_main() -> Result<()> {
     let mut cfg = Config::load()?;
     match cli.cmd {
         Cmd::Daemon { port, parent_pid, token } => daemon::run(cfg, daemon::DaemonOptions { port, parent_pid, token }).await,
-        Cmd::Hub { listen, public_url, token, dist } => hub::run(listen, public_url, token, dist).await,
+        Cmd::Hub { listen, public_url, token, dist, release_url } => hub::run(listen, public_url, token, dist, Some(release_url)).await,
         Cmd::Start => {
             let c = ensure_daemon(&cfg).await?;
             let st = c.call("daemon.status", json!({})).await?;
@@ -396,49 +409,83 @@ async fn real_main() -> Result<()> {
             println!("suspended {} · removed {}", r["suspended"].as_array().map_or(0, |a| a.len()), r["removed"].as_array().map_or(0, |a| a.len()));
             Ok(())
         }
-        Cmd::Connect { url, code, token, name } => {
+        Cmd::Connect { url, code, token, name, access, private } => {
             link::ws_url(&url, "")?;
             if code.is_none() && token.is_none() {
                 bail!("pass --code <pairing code> or --token <token>");
             }
-            cfg.hub_url = Some(url.trim_end_matches('/').to_string());
-            cfg.hub_token = token;
-            cfg.hub_pair_code = code;
+            if let Some(a) = &access {
+                if !agl::session::ACCESS_LEVELS.contains(&a.as_str()) {
+                    bail!("--access must be one of {}", agl::session::ACCESS_LEVELS.join(", "));
+                }
+            }
+            let url = config::normalize_url(&url);
+            // Adding a hub keeps the others; re-connecting one replaces its credentials.
+            let mut entry = cfg.hub(&url).cloned().unwrap_or_else(|| config::HubLink::new(&url));
+            entry.token = token;
+            entry.pair_code = code;
+            if let Some(a) = access {
+                entry.access = a;
+            }
+            if private {
+                entry.share_local = false;
+            }
+            cfg.hubs.retain(|h| h.url != url);
+            cfg.hubs.push(entry.clone());
             if name.is_some() {
                 cfg.machine_name = name;
             }
             cfg.save()?;
             let c = ensure_daemon(&cfg).await?;
             c.call("hub.reload", json!({})).await?;
-            for _ in 0..40 {
+            for _ in 0..60 {
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 let st = c.call("daemon.status", json!({})).await?;
-                let hs = st["hub_status"].as_str().unwrap_or("").to_string();
-                if hs.starts_with("connected") {
-                    println!("✓ {hs}");
+                let hs = st["hubs"]
+                    .as_array()
+                    .and_then(|h| h.iter().find(|h| h["url"] == url.as_str()))
+                    .and_then(|h| h["status"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if hs == "connected" {
+                    println!("✓ connected to {url}");
                     println!("  machine id: {}", cfg.machine_id);
+                    println!("  sessions it creates default to `{}` access; it {} local sessions", entry.access, if entry.share_local { "can see" } else { "cannot see" });
                     return Ok(());
                 }
                 if hs.starts_with("error") || hs.starts_with("unauthorized") {
-                    bail!("{hs}");
+                    bail!("{url}: {hs}");
                 }
             }
-            bail!("timed out connecting to the hub; check `agl status`")
+            bail!("timed out connecting to {url}; check `agl status`")
         }
-        Cmd::Disconnect => {
-            cfg.hub_url = None;
-            cfg.hub_token = None;
-            cfg.hub_pair_code = None;
+        Cmd::Disconnect { url, all } => {
+            let before = cfg.hubs.len();
+            match (&url, all) {
+                (_, true) => cfg.hubs.clear(),
+                (Some(u), _) => {
+                    let u = config::normalize_url(u);
+                    cfg.hubs.retain(|h| h.url != u);
+                }
+                (None, false) if cfg.hubs.len() <= 1 => cfg.hubs.clear(),
+                (None, false) => bail!("linked to {} hubs; name one or pass --all", cfg.hubs.len()),
+            }
+            if cfg.hubs.len() == before {
+                bail!("not linked to {}", url.unwrap_or_default());
+            }
             cfg.save()?;
             if let Ok(c) = Client::connect_local().await {
                 c.call("hub.reload", json!({})).await?;
             }
-            println!("disconnected from hub");
+            println!("disconnected ({} hub{} left)", cfg.hubs.len(), if cfg.hubs.len() == 1 { "" } else { "s" });
             Ok(())
         }
         Cmd::Service { action } => match action {
             ServiceAction::Install => {
-                if let Ok(c) = Client::connect_local().await {
+                // A daemon the service manager does not own would hold the port
+                // and the home; systemd/launchd replace their own instance.
+                let managed = service::is_installed();
+                if let (false, Ok(c)) = (managed, Client::connect_local().await) {
                     let pid = c.call("daemon.status", json!({})).await.ok().and_then(|s| s["pid"].as_u64()).unwrap_or(0) as i32;
                     let _ = c.call("daemon.shutdown", json!({})).await;
                     for _ in 0..100 {
@@ -462,12 +509,26 @@ async fn real_main() -> Result<()> {
 async fn status(cfg: &Config) -> Result<()> {
     let Ok(c) = Client::connect_local().await else {
         println!("daemon:   not running (start with `agl start`)");
-        println!("hub:      {}", cfg.hub_url.as_deref().unwrap_or("not configured"));
+        for h in &cfg.hubs {
+            println!("hub:      {} (not connected)", h.url);
+        }
         return Ok(());
     };
     let s = c.call("daemon.status", json!({})).await?;
-    println!("daemon:   running · v{} · pid {} · 127.0.0.1:{}", s["version"].as_str().unwrap_or(""), s["pid"], s["port"]);
-    println!("hub:      {}", s["hub_status"].as_str().unwrap_or(""));
+    println!("daemon:   running · v{} · protocol {} · pid {} · 127.0.0.1:{}", s["version"].as_str().unwrap_or(""), s["protocol"], s["pid"], s["port"]);
+    let hubs = s["hubs"].as_array().cloned().unwrap_or_default();
+    if hubs.is_empty() {
+        println!("hub:      not linked (agl connect <url> --code <code>)");
+    }
+    for h in hubs {
+        println!(
+            "hub:      {} · {} · default access {}{}",
+            h["url"].as_str().unwrap_or(""),
+            h["status"].as_str().unwrap_or(""),
+            h["access"].as_str().unwrap_or(""),
+            if h["share_local"].as_bool().unwrap_or(true) { "" } else { " · private" }
+        );
+    }
     println!("access:   {} by default (full | edit | ask | read_only)", s["default_access"].as_str().unwrap_or(""));
     println!("machine:  {}", s["machine_id"].as_str().unwrap_or(""));
     println!("sessions: {} ({} live agent processes, max {})", s["sessions"], s["live"], s["max_live"]);

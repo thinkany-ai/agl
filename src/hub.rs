@@ -71,6 +71,8 @@ struct Hub {
     token: String,
     public_url: Option<String>,
     dist: Option<PathBuf>,
+    /// Where binaries not in `dist` come from (GitHub Releases by default).
+    release_url: Option<String>,
     store: Mutex<Persisted>,
     /// pairing code -> expiry (unix ms)
     codes: Mutex<HashMap<String, u64>>,
@@ -99,7 +101,9 @@ fn store_path() -> PathBuf {
     config::home().join("hub.json")
 }
 
-pub async fn run(listen: String, public_url: Option<String>, token: Option<String>, dist: Option<PathBuf>) -> Result<()> {
+pub const DEFAULT_RELEASE_URL: &str = "https://github.com/thinkany-ai/agl/releases/latest/download";
+
+pub async fn run(listen: String, public_url: Option<String>, token: Option<String>, dist: Option<PathBuf>, release_url: Option<String>) -> Result<()> {
     std::fs::create_dir_all(config::home())?;
     let mut store: Persisted = std::fs::read_to_string(store_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     if let Some(t) = token {
@@ -113,6 +117,7 @@ pub async fn run(listen: String, public_url: Option<String>, token: Option<Strin
         token: store.token.clone(),
         public_url: public_url.map(|u| u.trim_end_matches('/').to_string()),
         dist,
+        release_url: release_url.filter(|u| !u.is_empty()).map(|u| u.trim_end_matches('/').to_string()),
         store: Mutex::new(store),
         codes: Mutex::default(),
         machines: Mutex::default(),
@@ -181,8 +186,8 @@ impl Hub {
         let online = self.machines.lock().unwrap();
         let store = self.store.lock().unwrap();
         let mut list: Vec<Value> = online
-            .iter()
-            .map(|(_, m)| {
+            .values()
+            .map(|m| {
                 let mut v = m.info.clone();
                 v["online"] = json!(true);
                 v
@@ -265,6 +270,10 @@ async fn download(State(hub): State<Arc<Hub>>, Path(target): Path<String>) -> Re
             return ([(header::CONTENT_TYPE, "application/octet-stream")], bytes).into_response();
         }
     }
+    if let Some(base) = &hub.release_url {
+        let suffix = if want_sum { ".sha256" } else { "" };
+        return axum::response::Redirect::temporary(&format!("{base}/agl-{target}{suffix}")).into_response();
+    }
     (StatusCode::NOT_FOUND, format!("no agl build for {target} on this hub (put agl-{target} in --dist)")).into_response()
 }
 
@@ -322,7 +331,7 @@ async fn machine_conn(hub: Arc<Hub>, socket: WebSocket) {
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     hub.machines.lock().unwrap().insert(machine_id.clone(), MachineConn { conn, info, tx });
     hub.broadcast_machines();
-    println!("machine connected: {} ({machine_id})", machine.hostname);
+    println!("machine connected: {} ({machine_id}, agl {}, protocol {})", machine.hostname, machine.version, machine.protocol);
 
     let writer = tokio::spawn(async move {
         let mut ping = tokio::time::interval(Duration::from_secs(25));

@@ -11,6 +11,10 @@ use serde_json::Value;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Wire protocol version, sent in `hello` and `ping`. Bumped only for
+/// incompatible changes; new fields and events are additive.
+pub const PROTOCOL: u32 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WireMsg {
@@ -155,6 +159,9 @@ pub struct MachineInfo {
     pub os: String,
     pub arch: String,
     pub version: String,
+    /// Wire protocol version (`PROTOCOL`); 0 from agl ≤0.1.
+    #[serde(default)]
+    pub protocol: u32,
     pub agents: Vec<AgentInfo>,
 }
 

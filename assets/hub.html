@@ -414,7 +414,7 @@ function updateTop(hb) {
   const running = m && ["running", "starting", "waiting"].includes(m.status);
   const extra = hb && running ? ` · 已运行 ${secs(hb.elapsed_ms)}${hb.stalled ? ` · ${Math.round(hb.idle_ms / 1000)}s 无新输出` : ""}` : "";
   $("sess-title").innerHTML = m
-    ? `<b>${esc(m.name || m.id)} · ${esc(m.agent)}</b><span>${esc(m.cwd)} · ${esc(m.status)} · ${esc(ACCESS[m.access] || m.access)}${m.model ? " · " + esc(m.model) : ""}${extra}</span>`
+    ? `<b>${esc(m.name || m.id)} · ${esc(m.agent)}</b><span>${esc(m.cwd)} · ${esc(m.status)} · ${esc(ACCESS[m.access] || m.access)}${(m.current_model || m.model) ? " · " + esc(m.current_model || m.model) : ""}${extra}</span>`
     : `<b>未选择会话</b><span>在左侧选择或新建一个会话</span>`;
   $("btn-close-sess").style.display = m ? "" : "none";
   $("input").disabled = $("btn-send").disabled = !m;
@@ -429,7 +429,7 @@ function onEvent(msg) {
   const meta = list.find((s) => s.id === msg.session_id);
   if (!meta) { refreshSessions(msg.machine_id); }
   else if (msg.event.kind === "status") { meta.status = msg.event.status; renderSidebar(); }
-  else if (msg.event.kind === "info" && msg.event.model) { meta.model = meta.model || msg.event.model; }
+  else if (msg.event.kind === "info" && msg.event.model) { meta.current_model = msg.event.model; }
   if (msg.machine_id === state.sel.machine && msg.session_id === state.sel.session) {
     renderEvent(msg.event, true);
     if (msg.event.kind !== "heartbeat") updateTop();

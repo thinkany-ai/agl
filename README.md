@@ -29,11 +29,16 @@ The design draws on [botiverse/oar](https://github.com/botiverse/oar) and on the
 | **Automatic GC** | A hard cap on live processes (least recently used idle sessions are evicted first). Idle processes are suspended and expired sessions removed. Processes orphaned by a crash are reaped on the next start. |
 | **Reliability** | Heartbeats and stall detection. A turn that hasn't stopped 10s after an interrupt is killed. Claude falls back to its own login when an exported API key is rejected. PATH and API keys are imported from the login shell. |
 | **Remote linking** | One-time pairing codes and a per-machine token that can be revoked. The installer is HTTPS-only, verifies a sha256 checksum, and sets up launchd/systemd autostart. |
+| **Behind proxies and NAT** | The machine dials out; the hub link honours `HTTPS_PROXY` / `NO_PROXY` (also when started by launchd/systemd). |
+| **Several web apps per machine** | A machine can link to several hubs. Each one sees only the sessions it created, plus local ones unless linked `--private`. Remote sessions default to `ask`. |
 | **Integration options** | A local WebSocket API, a zero-dependency TypeScript client, a Rust crate, and an integration skill for coding agents. |
 
 ## Install
 
 ```bash
+# Prebuilt binary (macOS / Linux) into ~/.agl/bin, checksum verified
+curl -fsSL https://github.com/thinkany-ai/agl/releases/latest/download/install.sh | sh
+
 # From source (needs a recent stable Rust)
 cargo install --git https://github.com/thinkany-ai/agl
 
@@ -92,7 +97,7 @@ The hub web UI supports:
 - showing time to first token and total time;
 - revoking machines.
 
-The hub serves `agl-<os>-<arch>` binaries and their `.sha256` files from `--dist <dir>`. The binary for the hub's own platform is served without any setup.
+The hub serves `agl-<os>-<arch>` binaries and their `.sha256` files from `--dist <dir>`. The binary for the hub's own platform is served without any setup, and anything else redirects to the latest GitHub release (`--release-url`).
 
 ## Configuration
 
@@ -126,7 +131,7 @@ Other files in `~/.agl/`:
 
 ## Security
 
-- `full` access lets the agent run any command as you. For remote use, default to `ask` or `edit` and provide approvals in your UI.
+- `full` access lets the agent run any command as you. Sessions created by a hub default to `ask` (per link: `agl connect … --access`), so remote use asks before acting unless you opt in.
 - The local daemon listens on 127.0.0.1 only, and every connection must present the token from `daemon.json`.
 - The hub stores only hashes of machine tokens, and each machine can be revoked individually. Pairing codes are single-use and expire after 10 minutes.
 

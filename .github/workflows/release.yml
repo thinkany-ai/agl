@@ -1,0 +1,60 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: darwin-arm64, os: macos-14, target: aarch64-apple-darwin }
+          - { name: darwin-x64, os: macos-14, target: x86_64-apple-darwin }
+          - { name: linux-x64, os: ubuntu-24.04, target: x86_64-unknown-linux-musl, musl: true }
+          - { name: linux-arm64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, musl: true }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/agl dist/agl-${{ matrix.name }}
+          cd dist
+          if command -v sha256sum >/dev/null; then sha256sum agl-${{ matrix.name }} | awk '{print $1}' > agl-${{ matrix.name }}.sha256
+          else shasum -a 256 agl-${{ matrix.name }} | awk '{print $1}' > agl-${{ matrix.name }}.sha256; fi
+          ./agl-${{ matrix.name }} --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agl-${{ matrix.name }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Add the installer
+        run: cp assets/install.sh dist/install.sh
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          draft: ${{ github.event_name == 'workflow_dispatch' }}

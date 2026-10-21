@@ -29,11 +29,16 @@
 | **自动垃圾回收** | 进程数硬上限（按 LRU 驱逐空闲会话）、空闲挂起、过期删除；崩溃后自动清理残留进程 |
 | **稳定性** | 有心跳和卡死检测；中断 10s 后仍未结束就强制结束；API key 冲突时自动改用 CLI 的登录账号；从登录 shell 导入 PATH 和 key |
 | **远程接入** | 一次性配对码、每台机器独立 token、可吊销；安装脚本只允许 HTTPS、校验 sha256，并注册 launchd / systemd 开机自启 |
+| **代理与内网** | 机器主动外连；Hub 连接支持 `HTTPS_PROXY` / `NO_PROXY`（launchd / systemd 启动时同样生效） |
+| **一台机器连多个 web app** | 可以同时连多个 hub，每个 hub 只能看到自己创建的会话，以及本地会话（`--private` 时看不到）；远程创建的会话默认 `ask` |
 | **接入方式** | 本地 WebSocket，零依赖 TypeScript 客户端，Rust crate，给编码 Agent 用的接入 skill |
 
 ## 安装
 
 ```bash
+# 预编译二进制（macOS / Linux），安装到 ~/.agl/bin，并校验 sha256
+curl -fsSL https://github.com/thinkany-ai/agl/releases/latest/download/install.sh | sh
+
 # 从源码安装（需要较新的 stable Rust）
 cargo install --git https://github.com/thinkany-ai/agl
 
@@ -90,7 +95,7 @@ Hub 网页支持：
 - 显示首字时间和总耗时；
 - 吊销机器。
 
-Hub 的二进制分发：Hub 从 `--dist <dir>` 目录提供 `agl-<os>-<arch>` 及其 `.sha256`，和 Hub 同平台的那份可以直接提供。
+Hub 的二进制分发：Hub 从 `--dist <dir>` 目录提供 `agl-<os>-<arch>` 及其 `.sha256`，和 Hub 同平台的那份可以直接提供；其他平台会重定向到 GitHub 最新 release（`--release-url`）。
 
 ## 配置
 
@@ -124,7 +129,7 @@ Hub 的二进制分发：Hub 从 `--dist <dir>` 目录提供 `agl-<os>-<arch>` �
 
 ## 安全
 
-- `full` 等于让 Agent 以你的身份执行任意命令。远程场景请默认使用 `ask` 或 `edit`，并在 UI 里提供审批。
+- `full` 等于让 Agent 以你的身份执行任意命令。Hub 创建的会话默认 `ask`（可用 `agl connect … --access` 按连接修改），远程使用时 Agent 执行有风险的操作前都会先询问。
 - 本地 daemon 只监听 127.0.0.1，每个连接都要带 `daemon.json` 里的 token。
 - Hub 的机器 token 服务端只存哈希，可以单独吊销；配对码 10 分钟有效，只能用一次。
 

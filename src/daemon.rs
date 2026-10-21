@@ -25,13 +25,15 @@ use tokio::sync::{broadcast, mpsc, Notify};
 
 use crate::agents;
 use crate::config::{self, Config};
-use crate::protocol::{MachineInfo, WireMsg, VERSION};
-use crate::session::{ConfigureParams, CreateParams, Manager};
+use crate::protocol::{MachineInfo, WireMsg, PROTOCOL, VERSION};
+use crate::session::{ConfigureParams, CreateParams, Manager, Origin};
 
 pub struct Daemon {
     pub mgr: Arc<Manager>,
-    pub hub_status: Mutex<String>,
-    pub reload: Notify,
+    /// Link status per hub URL.
+    pub hub_status: Mutex<std::collections::HashMap<String, String>>,
+    /// Bumped whenever the hub configuration changes.
+    pub reload: tokio::sync::watch::Sender<u64>,
     pub shutdown: Notify,
     pub token: String,
     pub port: Mutex<u16>,
@@ -76,8 +78,8 @@ pub async fn run(cfg: Config, opts: DaemonOptions) -> Result<()> {
         .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
     let daemon = Arc::new(Daemon {
         mgr: mgr.clone(),
-        hub_status: Mutex::new("disabled".into()),
-        reload: Notify::new(),
+        hub_status: Mutex::default(),
+        reload: tokio::sync::watch::Sender::new(0),
         shutdown: Notify::new(),
         token,
         port: Mutex::new(port),
@@ -268,7 +270,7 @@ async fn local_conn(d: Arc<Daemon>, socket: WebSocket) {
                 }
                 let (d, out_tx) = (d.clone(), out_tx.clone());
                 tokio::spawn(async move {
-                    let res = dispatch(&d, &method, params, true).await;
+                    let res = dispatch(&d, &method, params, &Origin::Local).await;
                     let _ = out_tx.send(WireMsg::reply(id, res).to_json());
                 });
             }
@@ -286,6 +288,7 @@ pub async fn machine_info(cfg: &Config) -> MachineInfo {
         os: std::env::consts::OS.into(),
         arch: std::env::consts::ARCH.into(),
         version: VERSION.into(),
+        protocol: PROTOCOL,
         agents: agents::detect(cfg).await,
     }
 }
@@ -294,25 +297,37 @@ fn str_param<'a>(params: &'a Value, key: &str) -> Result<&'a str> {
     params[key].as_str().ok_or_else(|| anyhow!("missing parameter `{key}`"))
 }
 
-/// One request, from a local client (`local = true`) or from the hub.
-pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, local: bool) -> Result<Value> {
+/// One request, from a local client or from a linked hub. A hub only ever
+/// sees the sessions its `origin` may see.
+pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Origin) -> Result<Value> {
     let mgr = &d.mgr;
+    let local = *origin == Origin::Local;
+    // The session a request names, checked against the caller's visibility.
+    let sid = || -> Result<String> { mgr.resolve_for(str_param(&params, "session_id")?, origin) };
     Ok(match method {
-        "ping" => json!({"pong": true, "version": VERSION}),
+        "ping" => json!({"pong": true, "version": VERSION, "protocol": PROTOCOL}),
         "machine.info" => serde_json::to_value(machine_info(&mgr.cfg()).await)?,
         "agents.list" => serde_json::to_value(agents::detect(&mgr.cfg()).await)?,
         "agents.models" => agents::list_models(&mgr.cfg(), str_param(&params, "agent")?).await?,
         "daemon.status" => {
             let cfg = mgr.cfg();
+            let statuses = d.hub_status.lock().unwrap().clone();
+            let hubs: Vec<Value> = cfg
+                .hubs
+                .iter()
+                // A hub learns nothing about the machine's other hubs.
+                .filter(|h| local || Origin::Hub { url: h.url.clone(), share_local: false }.tag() == origin.tag())
+                .map(|h| json!({"url": h.url, "status": statuses.get(&h.url).cloned().unwrap_or_else(|| "starting".into()), "access": h.access, "share_local": h.share_local}))
+                .collect();
             json!({
                 "version": VERSION,
+                "protocol": PROTOCOL,
                 "pid": std::process::id(),
                 "port": *d.port.lock().unwrap(),
-                "home": config::home(),
+                "home": if local { json!(config::home()) } else { Value::Null },
                 "machine_id": cfg.machine_id,
-                "hub_url": cfg.hub_url,
-                "hub_status": *d.hub_status.lock().unwrap(),
-                "sessions": mgr.list().len(),
+                "hubs": hubs,
+                "sessions": mgr.list().iter().filter(|m| origin.sees(&m.origin)).count(),
                 "live": mgr.live_count(),
                 "default_access": cfg.default_access,
                 "idle_timeout_secs": cfg.idle_timeout_secs,
@@ -327,47 +342,54 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, local: bool)
         "hub.reload" if local => {
             let fresh = Config::load()?;
             *mgr.cfg.write().unwrap() = fresh;
-            d.reload.notify_one();
+            d.reload.send_modify(|g| *g += 1);
             json!({"ok": true})
         }
         "session.create" => {
-            let p: CreateParams = serde_json::from_value(params).context("session.create params")?;
+            let mut p: CreateParams = serde_json::from_value(params).context("session.create params")?;
+            if p.access.is_none() {
+                if let Origin::Hub { url, .. } = origin {
+                    // Remote sessions ask before acting unless the link says otherwise.
+                    p.access = Some(mgr.cfg().hub(url).map(|h| h.access.clone()).unwrap_or_else(|| "ask".into()));
+                }
+            }
+            p.origin = Some(origin.clone());
             serde_json::to_value(mgr.create(p)?)?
         }
         "session.prompt" => {
             let text = str_param(&params, "text")?.to_string();
             let turn_id = params["turn_id"].as_str().map(String::from);
-            mgr.prompt(str_param(&params, "session_id")?, text, params["mode"].as_str(), turn_id)?
+            mgr.prompt(&sid()?, text, params["mode"].as_str(), turn_id)?
         }
         "session.approve" => {
-            mgr.approve(str_param(&params, "session_id")?, str_param(&params, "request_id")?, str_param(&params, "decision")?).await?;
+            mgr.approve(&sid()?, str_param(&params, "request_id")?, str_param(&params, "decision")?).await?;
             json!({"ok": true})
         }
         "session.abort" => {
-            mgr.abort(str_param(&params, "session_id")?)?;
+            mgr.abort(&sid()?)?;
             json!({"ok": true})
         }
         "session.warm" => {
-            mgr.warm(str_param(&params, "session_id")?)?;
+            mgr.warm(&sid()?)?;
             json!({"ok": true})
         }
         "session.configure" => {
-            let key = str_param(&params, "session_id")?.to_string();
+            let key = sid()?;
             let p: ConfigureParams = serde_json::from_value(params).context("session.configure params")?;
             serde_json::to_value(mgr.configure(&key, p)?)?
         }
         "session.close" => {
-            mgr.close(str_param(&params, "session_id")?).await?;
+            mgr.close(&sid()?).await?;
             json!({"ok": true})
         }
-        "session.get" => serde_json::to_value(mgr.get(str_param(&params, "session_id")?)?)?,
-        "session.list" => serde_json::to_value(mgr.list())?,
+        "session.get" => serde_json::to_value(mgr.get(&sid()?)?)?,
+        "session.list" => serde_json::to_value(mgr.list().into_iter().filter(|m| origin.sees(&m.origin)).collect::<Vec<_>>())?,
         "session.history" => {
             let after = params["after_seq"].as_u64().unwrap_or(0);
             let limit = params["limit"].as_u64().map(|n| n as usize);
-            serde_json::to_value(mgr.history(str_param(&params, "session_id")?, after, limit)?)?
+            serde_json::to_value(mgr.history(&sid()?, after, limit)?)?
         }
-        "gc.run" => mgr.gc(params["idle"].as_bool().unwrap_or(false)).await,
+        "gc.run" if local => mgr.gc(params["idle"].as_bool().unwrap_or(false)).await,
         other => return Err(anyhow!("unknown method `{other}`")),
     })
 }

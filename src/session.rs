@@ -41,6 +41,9 @@ pub struct SessionMeta {
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
+    /// The model the runtime reported running (may differ from `model`).
+    #[serde(default)]
+    pub current_model: Option<String>,
     /// full | edit | ask | read_only
     #[serde(default = "default_access")]
     pub access: String,
@@ -67,10 +70,41 @@ pub struct SessionMeta {
     /// Claude rejected the API key; run it with its own login instead.
     #[serde(default)]
     pub use_login: bool,
+    /// Who created it: `local`, or the URL of the hub that did.
+    #[serde(default = "local_origin")]
+    pub origin: String,
 }
 
 fn default_access() -> String {
     "full".into()
+}
+
+fn local_origin() -> String {
+    "local".into()
+}
+
+/// Where a request comes from. A hub sees the sessions it created, plus
+/// local ones if it was linked with `share_local`; local clients see all.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Origin {
+    Local,
+    Hub { url: String, share_local: bool },
+}
+
+impl Origin {
+    pub fn tag(&self) -> String {
+        match self {
+            Origin::Local => local_origin(),
+            Origin::Hub { url, .. } => url.clone(),
+        }
+    }
+
+    pub fn sees(&self, session_origin: &str) -> bool {
+        match self {
+            Origin::Local => true,
+            Origin::Hub { url, share_local } => session_origin == url || (*share_local && session_origin == "local"),
+        }
+    }
 }
 
 enum Cmd {
@@ -114,6 +148,9 @@ pub struct CreateParams {
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
+    /// The model the runtime reported running (may differ from `model`).
+    #[serde(default)]
+    pub current_model: Option<String>,
     /// full | edit | ask | read_only (default from config).
     #[serde(default)]
     pub access: Option<String>,
@@ -126,6 +163,9 @@ pub struct CreateParams {
     /// Start the agent process now so the first prompt is warm.
     #[serde(default)]
     pub warm: bool,
+    /// Set by the dispatcher, never by the caller.
+    #[serde(skip)]
+    pub origin: Option<Origin>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -195,6 +235,19 @@ impl Manager {
         shared
     }
 
+    /// Resolve a session the caller may see; invisible ones do not exist for it.
+    pub fn resolve_for(&self, key: &str, origin: &Origin) -> Result<String> {
+        let id = self.resolve(key).ok_or_else(|| anyhow!("no session `{key}`"))?;
+        match self.origin_of(&id) {
+            Some(o) if origin.sees(&o) => Ok(id),
+            _ => bail!("no session `{key}`"),
+        }
+    }
+
+    pub fn origin_of(&self, id: &str) -> Option<String> {
+        self.sessions.lock().unwrap().get(id).map(|h| h.shared.meta.lock().unwrap().origin.clone())
+    }
+
     /// Resolve a session by id, name or unique id prefix (≥4 chars).
     pub fn resolve(&self, key: &str) -> Option<String> {
         let sessions = self.sessions.lock().unwrap();
@@ -232,10 +285,14 @@ impl Manager {
         if !ACCESS_LEVELS.contains(&access.as_str()) {
             bail!("access must be one of {}", ACCESS_LEVELS.join(", "));
         }
+        let origin = p.origin.clone().unwrap_or(Origin::Local);
         if let Some(name) = &p.name {
             if let Some(id) = self.resolve(name) {
                 let (_, shared, tx) = self.handle(&id)?;
                 let meta = shared.meta.lock().unwrap().clone();
+                if !origin.sees(&meta.origin) {
+                    bail!("session name `{name}` is in use");
+                }
                 if meta.agent != p.agent {
                     bail!("session `{name}` exists with agent `{}`", meta.agent);
                 }
@@ -260,6 +317,7 @@ impl Manager {
             cwd,
             model: p.model,
             effort: p.effort,
+            current_model: None,
             access,
             native_id: p.resume,
             status: "idle".into(),
@@ -271,6 +329,7 @@ impl Manager {
             pending_approvals: 0,
             features: def.protocol.features(),
             use_login: false,
+            origin: origin.tag(),
         };
         let shared = self.start_actor(meta.clone());
         if p.warm {
@@ -717,7 +776,8 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                             }
                         }
                         if let AgentEvent::Info { model: Some(m), .. } = &e {
-                            shared.meta.lock().unwrap().model.get_or_insert(m.clone());
+                            // What the runtime runs; `model` stays what was asked for.
+                            shared.meta.lock().unwrap().current_model = Some(m.clone());
                         }
                         emit!(e);
                     }
@@ -806,7 +866,16 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                             m.last_active_at = now_ms();
                         }
                         let t = timing(&r);
+                        // Observers acting on turn_ended must already see the
+                        // session as idle; the status event still follows it.
+                        let idle = queue.is_empty();
+                        if idle {
+                            shared.meta.lock().unwrap().status = "idle".into();
+                        }
                         emit!(AgentEvent::TurnEnded { turn_id: r.turn_id, outcome, error, usage, timing: Some(t) });
+                        if idle {
+                            emit!(AgentEvent::Status { status: "idle".into() });
+                        }
                         save_history(&shared);
                         mgr.persist();
                     }
@@ -849,7 +918,7 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                 let mut kill_reason: Option<String> = None;
                 if let Some(r) = current.as_ref() {
                     let idle = r.last_output.elapsed();
-                    if ticks % 3 == 0 {
+                    if ticks.is_multiple_of(3) {
                         emit!(AgentEvent::Heartbeat {
                             turn_id: r.turn_id.clone(),
                             elapsed_ms: r.started.elapsed().as_millis() as u64,
@@ -940,16 +1009,15 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                 }
             }
         }
-        while current.is_none() && driver.is_some() {
+        while current.is_none() {
+            let Some(d) = driver.as_mut() else { break };
             let Some((turn_id, text)) = queue.pop_front() else { break };
-            let d = driver.as_mut().expect("driver present");
             emit!(AgentEvent::TurnStarted { turn_id: turn_id.clone() });
             mgr.set_status(&shared, "running");
             let now = Instant::now();
             let cold = launch_ms.take();
             match d.prompt(&text).await {
                 Ok(()) => {
-                    let text = text;
                     current = Some(Running {
                         turn_id,
                         started: now,

@@ -22,25 +22,48 @@ Framing:
   - `paired {token}`: hub → machine, sent after a pairing-code connect.
 - `id` is a string you choose. Responses can arrive in any order.
 
+**Versioning.** `hello.machine.protocol` and `ping` carry the wire protocol
+version (currently `1`; agl ≤0.1 sends none, read it as `0`). New fields,
+methods and event kinds are additive within a version, so clients must
+ignore what they do not know. Only an incompatible change bumps the version.
+
+## Visibility: one machine, several hubs
+
+A machine can link to several hubs (`agl connect` once per hub). Every
+session records its `origin`: `local` (CLI, apps on the machine), or the URL
+of the hub that created it.
+
+| caller | sees and can drive |
+|---|---|
+| local clients | every session |
+| a hub | the sessions it created, plus `local` ones if it was linked with `share_local` (the default; `agl connect --private` turns it off) |
+
+Sessions a hub may not see do not exist for it: methods answer `no session`,
+`session.list` leaves them out, and their events are never sent on that
+hub's link. Sessions a hub creates without naming `access` get the link's
+access (default `ask`).
+
 ## Local-only methods
 
 | method | params | result |
 |---|---|---|
 | `subscribe` / `unsubscribe` | `{session_id}` or `{all: true}` | Start or stop receiving that session's events. `session.prompt` subscribes you automatically. |
 | `daemon.shutdown` | – | Stops the daemon and every agent process. |
-| `hub.reload` | – | Re-reads `config.json` and reconnects to the hub. |
+| `hub.reload` | – | Re-reads `config.json` and reconciles the hub links. |
+| `gc.run` | `{idle?}` | `{suspended[], removed[]}` |
 
 ## Methods
 
 | method | params | result / notes |
 |---|---|---|
-| `ping` | – | `{pong, version}` |
-| `machine.info` | – | `{machine_id, hostname, os, arch, version, agents[]}` |
+| `ping` | – | `{pong, version, protocol}` |
+| `machine.info` | – | `{machine_id, hostname, os, arch, version, protocol, agents[]}` |
 | `agents.list` | – | `AgentInfo[]`: `{id, name, protocol, available, path, version, features[]}` |
 | `agents.models` | `{agent}` | `{agent, models: [{id, name, description?, default?, efforts?[]}]}`. Never starts a conversation the user would see. |
-| `daemon.status` | – | Version, pid, port, hub_status, sessions, live, defaults |
+| `daemon.status` | – | Version, protocol, pid, port, `hubs: [{url, status, access, share_local}]` (a hub sees only its own entry), visible sessions, live processes, defaults |
 | `session.create` | `{agent, cwd?, model?, effort?, access?, name?, resume?, warm?}` | `SessionMeta`. Details: |
-| | | `name`: if a session with that name exists, it is reused. |
+| | | `name`: if a session with that name exists (and is visible to the caller), it is reused. |
+| | | `access`: when omitted, the config's `default_access` for local callers, the link's `access` (default `ask`) for a hub. |
 | | | `resume`: attaches a native id. |
 | | | `warm`: starts the process now (only takes a free slot). |
 | | | `cwd` defaults to the home directory, and `~/` is expanded. |
@@ -56,7 +79,6 @@ Framing:
 | `session.get` / `session.list` | `{session_id}` / – | `SessionMeta` / `SessionMeta[]`, most recent first |
 | `session.history` | `{session_id, after_seq?, limit?}` | `EventEnvelope[]`. Consecutive `text_delta` events are merged. History is persisted, so it survives a daemon restart. |
 | `session.close` | `{session_id}` | Kills the process and deletes the session. |
-| `gc.run` | `{idle?}` | `{suspended[], removed[]}` |
 
 `session_id` accepts any of: the id, the session name, or an id prefix of at
 least 4 characters.
@@ -76,12 +98,16 @@ Hub-level methods take no `machine_id`:
 ```json
 {
   "id": "8b6d5cf21266", "name": "web-demo", "agent": "claude", "cwd": "/Users/me/proj",
-  "model": "haiku", "effort": null, "access": "ask", "native_id": "6f0c…",
+  "model": "haiku", "current_model": "claude-haiku-5-5", "effort": null, "access": "ask",
+  "native_id": "6f0c…", "origin": "local",
   "status": "idle", "created_at": 1792559001027, "last_active_at": 1792559009456,
   "turns": 3, "queued": 0, "live": true, "pending_approvals": 0,
   "features": ["warm", "approvals", "steer", "interrupt", "models", "effort"]
 }
 ```
+
+`model` is what was asked for (null = the agent's default); `current_model`
+is what the runtime reported running. `origin` is `local` or a hub URL.
 
 `status` values:
 
@@ -166,9 +192,13 @@ How approval requests are handled:
   "idle_timeout_secs": 600, "session_ttl_secs": 604800,
   "approval_timeout_secs": 600, "stall_timeout_secs": 120, "turn_timeout_secs": 0,
   "tool_output_limit": 16384, "history_limit": 2000, "history_image_limit": 16,
-  "custom_agents": [{"id": "goose", "command": "goose", "args": ["acp"], "protocol": "acp"}]
+  "custom_agents": [{"id": "goose", "command": "goose", "args": ["acp"], "protocol": "acp"}],
+  "hubs": [{"url": "https://app.example.com/agl", "token": "aglm_…", "access": "ask", "share_local": true}]
 }
 ```
+
+`hubs` is written by `agl connect` / `agl disconnect`; the single
+`hub_url` / `hub_token` fields of agl ≤0.1 are migrated into it on load.
 
 Environment variables:
 
@@ -179,3 +209,4 @@ Environment variables:
 | `AGL_<ID>_BIN` | Executable for agent `<ID>` |
 | `AGL_LOCAL_TOKEN` | Fixed local token |
 | `AGL_NO_LOGIN_SHELL` | Do not import the login shell's environment |
+| `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`, `NO_PROXY` | The hub link tunnels through an `http://[user:pass@]host:port` proxy (CONNECT). These are read from the process or the login shell, so a launchd/systemd daemon uses the user's proxy too. localhost is never proxied. |

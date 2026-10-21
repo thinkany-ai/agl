@@ -46,7 +46,7 @@ export interface Timing { warm: boolean; launch_ms: number | null; first_event_m
 export interface EventEnvelope { session_id: string; seq: number; ts: number; event: AgentEvent; machine_id?: string }
 
 export interface SessionMeta {
-  id: string; name?: string; agent: string; cwd: string; model?: string; effort?: string; access: Access;
+  id: string; name?: string; agent: string; cwd: string; model?: string; current_model?: string; effort?: string; access: Access; origin: string;
   native_id?: string; status: string; created_at: number; last_active_at: number; turns: number;
   queued: number; live: boolean; pending_approvals: number; features: string[];
 }

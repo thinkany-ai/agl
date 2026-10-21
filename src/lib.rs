@@ -11,6 +11,7 @@ pub mod daemon;
 pub mod hub;
 pub mod link;
 pub mod protocol;
+pub mod proxy;
 pub mod service;
 pub mod session;
 pub mod shellenv;

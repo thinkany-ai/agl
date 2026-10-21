@@ -43,18 +43,28 @@ two endpoints into your stack.
    `hello` (hostname, os, arch, version, agents). Mark it online.
 
 Binaries:
-- Serve `agl-<os>-<arch>` from your CDN with a `.sha256` next to each file, or
-  set `AGL_DOWNLOAD_URL` in the script.
-- Targets: `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`.
+- Every agl release on GitHub publishes `agl-<target>` and `agl-<target>.sha256`
+  for `darwin-arm64`, `darwin-x64`, `linux-x64` and `linux-arm64` (Linux
+  builds are static musl binaries).
+- Easiest: make `GET <base>/download/<target>[.sha256]` redirect (302) to
+  `https://github.com/thinkany-ai/agl/releases/latest/download/agl-<target>[.sha256]`.
+  This is what `agl hub` does for anything not in its `--dist` directory.
+- To pin a version or use your own CDN, serve the files yourself, or set
+  `AGL_DOWNLOAD_URL` in the script.
 
 ## 2. The machine link
+
+Check `hello.machine.protocol`: `1` today, `0` from agl ≤0.1. Within a
+version everything new is additive, so ignore unknown fields and event kinds.
 
 After `hello`, your backend:
 - sends `{"type":"request","id","method","params"}` and receives
   `{"type":"response","id","result"|"error"}`;
-- receives `{"type":"event","session_id","seq","ts","event"}` for **all**
-  sessions on that machine. That includes sessions started from the user's
-  terminal, so filter by ownership if you need to.
+- receives `{"type":"event","session_id","seq","ts","event"}` for the sessions
+  **your hub may see**: the ones it created, plus the user's local ones
+  (terminal, desktop apps) unless the machine was linked with
+  `agl connect --private`. Sessions created by other web apps the same
+  machine is linked to are never visible to you.
 
 What the daemon does on its side:
 - sends a WebSocket ping every 20s, and reconnects if it hears nothing for 60s;
@@ -94,9 +104,11 @@ A machine socket is held by **one** backend instance. With several pods:
 
 ## 5. Security checklist
 
-- `access` defaults to `full` on the machine. For remote control, create
-  sessions with `access: "ask"` or `"edit"` unless the user opted into full
-  access, and say so in your UI.
+- Sessions your hub creates without `access` default to `ask`: every risky
+  tool call becomes a `permission_request`, so build the approval UI first.
+  Pass `access: "full"` only when the user opted into it, and say so in your
+  UI. The machine owner can change the link's default with
+  `agl connect <url> --code … --access edit|full|read_only`.
 - Machine tokens:
   - one per machine, hashed at rest, revocable;
   - check ownership on every request (user ↔ machine_id);

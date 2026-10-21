@@ -351,6 +351,9 @@ pub(crate) async fn run_capture(bin: &std::path::Path, args: &[&str], timeout: D
     Some(String::from_utf8_lossy(&out.stdout[..out.stdout.len().min(2 << 20)]).into_owned())
 }
 
+/// Turns one line of a CLI's model listing into a model entry.
+type LineParser = fn(&str) -> Option<Value>;
+
 /// Models an agent can run, without starting a conversation.
 pub async fn list_models(cfg: &Config, id: &str) -> Result<Value> {
     let Some(d) = find_def(cfg, id) else { bail!("unknown agent `{id}`") };
@@ -360,7 +363,7 @@ pub async fn list_models(cfg: &Config, id: &str) -> Result<Value> {
         Protocol::Codex => codex::list_models(&bin).await?,
         Protocol::Acp => acp::list_models(&bin, &d).await?,
         _ => {
-            let (args, parse): (&[&str], fn(&str) -> Option<Value>) = match d.id.as_str() {
+            let (args, parse): (&[&str], LineParser) = match d.id.as_str() {
                 "opencode" => (&["models"], |l| {
                     (l.contains('/') && !l.contains(char::is_whitespace)).then(|| json!({"id": l, "name": l}))
                 }),
@@ -507,13 +510,9 @@ pub(crate) async fn kill_tree(child: &mut tokio::process::Child) {
 /// All descendants of `root` from the process table.
 #[cfg(unix)]
 fn descendants(root: u32) -> Vec<u32> {
-    let Ok(out) = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid="]).output() else { return vec![] };
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let mut it = line.split_whitespace().filter_map(|x| x.parse::<u32>().ok());
-        if let (Some(pid), Some(ppid)) = (it.next(), it.next()) {
-            children.entry(ppid).or_default().push(pid);
-        }
+    for (pid, ppid) in process_table() {
+        children.entry(ppid).or_default().push(pid);
     }
     let mut out = Vec::new();
     let mut stack = vec![root];
@@ -659,17 +658,51 @@ pub(crate) fn clip(s: &str, max: usize) -> String {
 
 // --- orphan tracking -------------------------------------------------------
 //
-// Every agent process group is recorded with a fingerprint (start time +
-// command line). A daemon that crashed leaves them behind; the next daemon
-// kills the ones whose fingerprint still matches, and never touches a reused
-// pid.
+// Every agent process group is recorded with its start time. A daemon that
+// crashed leaves them behind; the next daemon kills the ones whose start time
+// still matches, and never touches a reused pid.
 
 fn pid_dir() -> PathBuf {
     config::home().join("pids")
 }
 
+/// (pid, ppid) of every process: /proc on Linux (minimal images have no
+/// `ps`), `ps` elsewhere.
+#[cfg(unix)]
+fn process_table() -> Vec<(u32, u32)> {
+    if let Ok(rd) = std::fs::read_dir("/proc") {
+        let table: Vec<(u32, u32)> = rd
+            .flatten()
+            .filter_map(|e| {
+                let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+                let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
+                // The command name may contain spaces; fields follow the last ')'.
+                let ppid = stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()?;
+                Some((pid, ppid))
+            })
+            .collect();
+        if !table.is_empty() {
+            return table;
+        }
+    }
+    let Ok(out) = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid="]).output() else { return vec![] };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut it = line.split_whitespace().filter_map(|x| x.parse::<u32>().ok());
+            Some((it.next()?, it.next()?))
+        })
+        .collect()
+}
+
+/// The process start time: with the pid it identifies a process, so a reused
+/// pid is never mistaken for ours. (Not the command line: shebang scripts and
+/// npm wrappers exec into something else right after spawn.)
 fn fingerprint(pid: u32) -> Option<String> {
-    let out = std::process::Command::new("ps").args(["-o", "lstart=,command=", "-p", &pid.to_string()]).output().ok()?;
+    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        return stat.rsplit_once(')')?.1.split_whitespace().nth(19).map(String::from);
+    }
+    let out = std::process::Command::new("ps").args(["-o", "lstart=", "-p", &pid.to_string()]).output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!s.is_empty()).then_some(s)
 }
@@ -792,6 +825,28 @@ pub(crate) mod rpc {
                 let _ = p.send(Err("process exited".into()));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod reap_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn reaps_a_tracked_process_that_exec_ed_after_spawn() {
+        let home = std::env::temp_dir().join(format!("agl-reap-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("AGL_HOME", &home);
+        use std::os::unix::process::CommandExt;
+        // `sh` replaces itself with `sleep`, like shebang scripts and npm shims.
+        let mut child = std::process::Command::new("sh").args(["-c", "exec sleep 30"]).process_group(0).spawn().unwrap();
+        track(child.id());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(reap_orphans(), 1);
+        let status = child.wait().unwrap();
+        assert!(!status.success(), "the orphan was killed");
+        assert_eq!(reap_orphans(), 0, "records are consumed");
     }
 }
 

@@ -31,9 +31,11 @@ const IMPORT_PREFIXES: &[&str] = &[
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",
+    "ALL_PROXY",
     "http_proxy",
     "https_proxy",
     "no_proxy",
+    "all_proxy",
 ];
 
 struct ShellEnv {
@@ -187,6 +189,11 @@ pub fn apply(cmd: &mut tokio::process::Command) {
 /// Whether a variable is visible to agents (process env or imported).
 pub fn has_var(key: &str) -> bool {
     std::env::var_os(key).is_some() || get().vars.contains_key(key)
+}
+
+/// A variable from the process environment, else from the login shell.
+pub fn var(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.is_empty()).or_else(|| get().vars.get(key).cloned().filter(|v| !v.is_empty()))
 }
 
 /// Find an executable on the agent PATH. Skips scripts whose interpreter is
