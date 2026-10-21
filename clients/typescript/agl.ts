@@ -19,6 +19,9 @@
 export type Access = "full" | "edit" | "ask" | "read_only";
 export type Decision = "allow" | "allow_session" | "deny";
 
+/** An image a tool returned (base64). `omitted` images carry no data. */
+export interface ToolImage { mime_type: string; data: string; omitted?: boolean }
+
 export type AgentEvent =
   | { kind: "status"; status: "idle" | "starting" | "running" | "waiting" | "suspended" | "closed" }
   | { kind: "user_message"; turn_id: string; text: string }
@@ -28,7 +31,7 @@ export type AgentEvent =
   | { kind: "text_delta"; text: string }
   | { kind: "reasoning"; text: string }
   | { kind: "tool_start"; call_id: string; name: string; input: unknown }
-  | { kind: "tool_end"; call_id: string; ok: boolean; output: string }
+  | { kind: "tool_end"; call_id: string; ok: boolean; output: string; images?: ToolImage[] }
   | { kind: "plan"; entries: unknown }
   | { kind: "permission_request"; request_id: string; tool: string; title: string; input: unknown; options: Decision[]; expires_at: number }
   | { kind: "permission_resolved"; request_id: string; decision: Decision; by: "client" | "policy" | "timeout" | "cancelled" }

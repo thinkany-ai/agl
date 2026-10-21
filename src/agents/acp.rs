@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use tokio::process::Child;
 
 use super::rpc::Peer;
-use super::{base_command, clip, kill_tree, spawn_frame_reader, spawn_stderr_tail, track, Decision, DriverMsg, DriverTx, PermissionAsk, SpawnSpec};
+use super::{base_command, kill_tree, split_content, spawn_frame_reader, spawn_stderr_tail, track, Decision, DriverMsg, DriverTx, PermissionAsk, SpawnSpec};
 use crate::protocol::AgentEvent;
 
 const ACK: Duration = Duration::from_secs(60);
@@ -392,15 +392,11 @@ fn map_update(u: &Value, state: &Arc<Mutex<State>>) -> Vec<DriverMsg> {
                             input: u.get("rawInput").cloned().unwrap_or(Value::Null),
                         }));
                     }
-                    let mut output = content_text(&u["content"]);
-                    if output.is_empty() {
-                        output = match &u["rawOutput"] {
-                            Value::Null => String::new(),
-                            Value::String(x) => x.clone(),
-                            other => other.to_string(),
-                        };
+                    let (mut output, mut images) = split_content(&u["content"], s.limit);
+                    if output.is_empty() && images.is_empty() {
+                        (output, images) = split_content(&u["rawOutput"], s.limit);
                     }
-                    out.push(DriverMsg::Event(AgentEvent::ToolEnd { call_id: id, ok: st == "completed", output: clip(&output, s.limit) }));
+                    out.push(DriverMsg::Event(AgentEvent::ToolEnd { call_id: id, ok: st == "completed", output, images }));
                     out
                 }
                 _ => vec![],

@@ -14,7 +14,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::Mutex as AsyncMutex;
 
-use super::{base_command, clip, kill_tree, spawn_frame_reader, spawn_stderr_tail, track, Decision, DriverMsg, DriverTx, PermissionAsk, SpawnSpec};
+use super::{base_command, kill_tree, split_content, spawn_frame_reader, spawn_stderr_tail, track, Decision, DriverMsg, DriverTx, PermissionAsk, SpawnSpec};
 use crate::protocol::AgentEvent;
 
 /// Read-only tools allowed in `read_only` access (everything else is denied
@@ -228,16 +228,12 @@ impl State {
             }
             "user" => {
                 for b in f["message"]["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "tool_result") {
-                    let output = match &b["content"] {
-                        Value::String(s) => s.clone(),
-                        Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n"),
-                        Value::Null => String::new(),
-                        other => other.to_string(),
-                    };
+                    let (output, images) = split_content(&b["content"], self.limit);
                     out.push(ev(AgentEvent::ToolEnd {
                         call_id: b["tool_use_id"].as_str().unwrap_or_default().into(),
                         ok: !b["is_error"].as_bool().unwrap_or(false),
-                        output: clip(&output, self.limit),
+                        output,
+                        images,
                     }));
                 }
             }

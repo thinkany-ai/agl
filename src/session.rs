@@ -452,7 +452,10 @@ impl Manager {
         let session_id = shared.meta.lock().unwrap().id.clone();
         let env = EventEnvelope { session_id, seq: shared.seq.fetch_add(1, Ordering::SeqCst) + 1, ts: now_ms(), event };
         {
-            let limit = self.cfg.read().unwrap().history_limit;
+            let (limit, image_limit) = {
+                let cfg = self.cfg.read().unwrap();
+                (cfg.history_limit, cfg.history_image_limit)
+            };
             let mut h = shared.history.lock().unwrap();
             // Merge consecutive text deltas so history stays compact.
             let merged = match (h.back_mut(), &env.event) {
@@ -474,6 +477,9 @@ impl Manager {
             while h.len() > limit {
                 h.pop_front();
             }
+            if matches!(&env.event, AgentEvent::ToolEnd { images, .. } if !images.is_empty()) {
+                age_out_images(&mut h, image_limit);
+            }
         }
         let _ = self.bus.send(env);
     }
@@ -490,6 +496,23 @@ impl Manager {
         };
         if changed {
             self.emit(shared, AgentEvent::Status { status: status.to_string() });
+        }
+    }
+}
+
+/// Keep the data of the newest `keep` images in a history; older images stay
+/// as `omitted` placeholders so the history file does not grow without bound.
+/// Live subscribers already received every image in full.
+fn age_out_images(history: &mut VecDeque<EventEnvelope>, keep: usize) {
+    let mut seen = 0;
+    for envelope in history.iter_mut().rev() {
+        let AgentEvent::ToolEnd { images, .. } = &mut envelope.event else { continue };
+        for image in images.iter_mut().rev().filter(|image| !image.omitted) {
+            seen += 1;
+            if seen > keep {
+                image.data = String::new();
+                image.omitted = true;
+            }
         }
     }
 }
@@ -966,4 +989,34 @@ fn timing(r: &Running) -> Value {
         "first_text_ms": r.first_text_ms,
         "total_ms": r.started.elapsed().as_millis() as u64,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::ToolImage;
+
+    fn tool_end(n: usize) -> EventEnvelope {
+        let images = (0..n).map(|_| ToolImage { mime_type: "image/png".into(), data: "AAAA".into(), omitted: false }).collect();
+        EventEnvelope {
+            session_id: "s".into(),
+            seq: 0,
+            ts: 0,
+            event: AgentEvent::ToolEnd { call_id: "c".into(), ok: true, output: String::new(), images },
+        }
+    }
+
+    #[test]
+    fn history_keeps_only_the_newest_images() {
+        let mut history: VecDeque<_> = [tool_end(2), tool_end(1), tool_end(2)].into();
+        age_out_images(&mut history, 3);
+        let kept: Vec<Vec<bool>> = history
+            .iter()
+            .map(|e| match &e.event {
+                AgentEvent::ToolEnd { images, .. } => images.iter().map(|i| !i.omitted).collect(),
+                _ => vec![],
+            })
+            .collect();
+        assert_eq!(kept, vec![vec![false, false], vec![true], vec![true, true]]);
+    }
 }

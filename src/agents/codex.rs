@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use tokio::process::Child;
 
 use super::rpc::Peer;
-use super::{base_command, clip, kill_tree, spawn_frame_reader, spawn_stderr_tail, track, Decision, DriverMsg, DriverTx, PermissionAsk, SpawnSpec};
+use super::{base_command, clip, kill_tree, split_content, spawn_frame_reader, spawn_stderr_tail, track, Decision, DriverMsg, DriverTx, PermissionAsk, SpawnSpec};
 use crate::protocol::AgentEvent;
 
 const ACK: Duration = Duration::from_secs(60);
@@ -37,8 +37,9 @@ enum Approval {
     V2(Value),
     /// legacy v1: {decision: approved|approved_for_session|denied}
     V1(Value),
-    /// MCP elicitation without a form: {action: accept|decline}
-    Elicitation(Value),
+    /// MCP elicitation without a form: {action: accept|decline}, plus the
+    /// `_meta.persist` scopes the request offers (e.g. "session", "always").
+    Elicitation(Value, Vec<String>),
 }
 
 type Approvals = Arc<Mutex<HashMap<String, Approval>>>;
@@ -52,6 +53,18 @@ pub struct CodexDriver {
 }
 
 const TOOL_ITEMS: &[&str] = &["commandExecution", "fileChange", "mcpToolCall", "webSearch", "dynamicToolCall", "imageView"];
+
+/// The text output of a built-in (non-MCP) tool item.
+fn tool_text(ty: &str, item: &Value, status: &str) -> String {
+    match ty {
+        "commandExecution" => item["aggregatedOutput"].as_str().unwrap_or_default().to_string(),
+        "fileChange" => item["changes"]
+            .as_array()
+            .map(|c| c.iter().filter_map(|x| x["path"].as_str()).collect::<Vec<_>>().join("\n"))
+            .unwrap_or_default(),
+        _ => status.to_string(),
+    }
+}
 
 fn thread_params(spec: &SpawnSpec) -> Value {
     let (sandbox, approval) = match spec.access.as_str() {
@@ -230,10 +243,14 @@ impl CodexDriver {
                 id,
                 json!({"decision": match decision { Decision::Allow => "approved", Decision::AllowSession => "approved_for_session", Decision::Deny => "denied" }}),
             ),
-            Approval::Elicitation(id) => (
+            Approval::Elicitation(id, persist) => (
                 id,
                 match decision {
                     Decision::Deny => json!({"action": "decline", "content": null}),
+                    // Computer use asks once per app; remember the answer for the session.
+                    Decision::AllowSession if persist.iter().any(|p| p == "session") => {
+                        json!({"action": "accept", "content": {}, "_meta": {"persist": "session"}})
+                    }
                     _ => json!({"action": "accept", "content": {}}),
                 },
             ),
@@ -281,7 +298,11 @@ fn server_request(p: &Peer, ap: &Approvals, tx: &DriverTx, gen: u64, id: Value, 
         {
             let server = params["serverName"].as_str().unwrap_or("mcp");
             let msg = params["message"].as_str().unwrap_or("confirm").to_string();
-            ask(&format!("mcp:{server}"), msg, Approval::Elicitation(id));
+            let persist = params["_meta"]["persist"]
+                .as_array()
+                .map(|p| p.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            ask(&format!("mcp:{server}"), msg, Approval::Elicitation(id, persist));
         }
         _ => {
             let p = p.clone();
@@ -351,19 +372,24 @@ fn map_notification(method: &str, p: &Value, state: &Arc<Mutex<TurnState>>) -> V
             }
             let status = item["status"].as_str().unwrap_or("completed");
             let exit_ok = item["exitCode"].as_i64().map(|c| c == 0).unwrap_or(true);
-            let output = match ty {
-                "commandExecution" => item["aggregatedOutput"].as_str().unwrap_or_default().to_string(),
-                "mcpToolCall" | "dynamicToolCall" => item["result"].to_string(),
-                "fileChange" => item["changes"]
-                    .as_array()
-                    .map(|c| c.iter().filter_map(|x| x["path"].as_str()).collect::<Vec<_>>().join("\n"))
-                    .unwrap_or_default(),
-                _ => status.to_string(),
+            let (output, images) = match ty {
+                // MCP results carry text and images (computer-use screenshots).
+                "mcpToolCall" | "dynamicToolCall" => {
+                    let result = if item["result"].is_null() { &item["contentItems"] } else { &item["result"] };
+                    let (text, images) = split_content(result, s.limit);
+                    let text = match (text.is_empty(), item["error"]["message"].as_str()) {
+                        (true, Some(err)) => err.to_string(),
+                        _ => text,
+                    };
+                    (text, images)
+                }
+                _ => (tool_text(ty, item, status), Vec::new()),
             };
             ev(AgentEvent::ToolEnd {
                 call_id: item["id"].as_str().unwrap_or_default().into(),
                 ok: status == "completed" && exit_ok,
                 output: clip(&output, s.limit),
+                images,
             })
         }
         "turn/started" => {

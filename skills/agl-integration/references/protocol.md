@@ -105,7 +105,7 @@ Hub-level methods take no `machine_id`:
 | `text_delta` | `text` | Append in order. `"\n\n"` separates the agent's messages. |
 | `reasoning` | `text` | Thinking, where the runtime exposes it |
 | `tool_start` | `call_id, name, input` | |
-| `tool_end` | `call_id, ok, output` | `output` is capped at `tool_output_limit` (16KB) |
+| `tool_end` | `call_id, ok, output, images?` | `output` is the tool's text, capped at `tool_output_limit` (16KB). `images` are the images it returned, e.g. Codex computer-use screenshots: `[{mime_type, data (base64), omitted?}]`. Images over 4MB, and images beyond the newest `history_image_limit` in `session.history`, arrive with `omitted: true` and no data. |
 | `plan` | `entries` | ACP plan, or claude TodoWrite `[{content, status}]` |
 | `permission_request` | `request_id, tool, title, input, options[], expires_at` | Answer with `session.approve` |
 | `permission_resolved` | `request_id, decision, by` | `by` is one of `client`, `policy`, `timeout`, `cancelled` |
@@ -165,7 +165,7 @@ How approval requests are handled:
   "port": 7799, "default_access": "full", "max_live": 8,
   "idle_timeout_secs": 600, "session_ttl_secs": 604800,
   "approval_timeout_secs": 600, "stall_timeout_secs": 120, "turn_timeout_secs": 0,
-  "tool_output_limit": 16384, "history_limit": 2000,
+  "tool_output_limit": 16384, "history_limit": 2000, "history_image_limit": 16,
   "custom_agents": [{"id": "goose", "command": "goose", "args": ["acp"], "protocol": "acp"}]
 }
 ```

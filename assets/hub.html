@@ -71,6 +71,7 @@
   .tool { font-family: var(--mono); font-size: 12px; background: var(--tool); border-radius: 10px; padding: 6px 10px; max-width: 90%; }
   .tool summary { cursor: pointer; list-style: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tool pre { margin: 6px 0 0; white-space: pre-wrap; max-height: 260px; overflow: auto; color: var(--sub); }
+  .tool .tool-img { display: block; margin-top: 6px; max-width: 100%; max-height: 360px; border-radius: 8px; border: 1px solid var(--line, #0002); }
   .ok { color: var(--ok); } .bad { color: var(--bad); }
   .note { color: var(--sub); font-size: 12px; }
   .note.bad { color: var(--bad); }
@@ -344,6 +345,12 @@ function renderEvent(ev, live) {
       const d = toolEls.get(ev.call_id); if (!d) break;
       d.querySelector(".mark").outerHTML = ev.ok ? `<span class="ok">✓</span>` : `<span class="bad">✗</span>`;
       if (ev.output) d.insertAdjacentHTML("beforeend", `<pre>${esc(ev.output)}</pre>`);
+      for (const img of ev.images || []) {
+        if (img.omitted) continue;
+        const el = document.createElement("img");
+        el.className = "tool-img"; el.src = `data:${img.mime_type};base64,${img.data}`;
+        d.appendChild(el); if (!d.open) d.open = true;
+      }
       break;
     }
     case "permission_request": {

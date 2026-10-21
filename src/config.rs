@@ -43,6 +43,8 @@ pub struct Config {
     pub tool_output_limit: usize,
     /// Events kept per session for `session.history` (also persisted).
     pub history_limit: usize,
+    /// Images whose data the history keeps; older ones are kept as `omitted`.
+    pub history_image_limit: usize,
     /// Extra agents, e.g. any ACP-speaking CLI:
     /// `{"id":"goose","command":"goose","args":["acp"],"protocol":"acp"}`
     pub custom_agents: Vec<CustomAgent>,
@@ -85,6 +87,7 @@ impl Default for Config {
             turn_timeout_secs: 0,
             tool_output_limit: 16 * 1024,
             history_limit: 2000,
+            history_image_limit: 16,
             custom_agents: Vec::new(),
         }
     }

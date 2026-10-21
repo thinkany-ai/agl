@@ -81,8 +81,12 @@ pub enum AgentEvent {
     ToolEnd {
         call_id: String,
         ok: bool,
+        /// The tool's text output, capped at `tool_output_limit`.
         #[serde(default)]
         output: String,
+        /// Images the tool returned, e.g. computer-use screenshots.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ToolImage>,
     },
     TurnEnded {
         turn_id: String,
@@ -130,6 +134,18 @@ pub enum AgentEvent {
         model: Option<String>,
     },
     Error { message: String },
+}
+
+/// An image in a tool result, base64-encoded.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ToolImage {
+    pub mime_type: String,
+    /// Base64 data; empty when `omitted`.
+    #[serde(default)]
+    pub data: String,
+    /// The data was dropped: too large, or aged out of the history.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub omitted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

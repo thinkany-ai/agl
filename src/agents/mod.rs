@@ -30,7 +30,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::{self, Config, CustomAgent};
-use crate::protocol::{AgentEvent, AgentInfo};
+use crate::protocol::{AgentEvent, AgentInfo, ToolImage};
 use crate::shellenv;
 
 /// Largest JSON frame accepted from an agent; longer lines are dropped.
@@ -567,6 +567,84 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// Images larger than this (base64 bytes) are reported as `omitted`.
+const MAX_IMAGE_BYTES: usize = 4 << 20;
+
+/// Split a tool result into its text and its images.
+///
+/// Understands the shapes the runtimes use: an MCP `CallToolResult`
+/// (`{content: [...], structuredContent, _meta}`), MCP/ACP content blocks
+/// (`{type: "image", data, mimeType}`, ACP's `{type: "content", content}`),
+/// Anthropic image blocks (`{type: "image", source: {data, media_type}}`) and
+/// Codex dynamic-tool items (`{type: "inputImage", imageUrl: "data:…"}`).
+/// Metadata such as `_meta` is dropped; anything unrecognized is kept as JSON.
+pub(crate) fn split_content(v: &Value, limit: usize) -> (String, Vec<ToolImage>) {
+    let mut text = Vec::new();
+    let mut images = Vec::new();
+    collect_content(v, &mut text, &mut images);
+    (clip(&text.join("\n"), limit), images)
+}
+
+fn collect_content(v: &Value, text: &mut Vec<String>, images: &mut Vec<ToolImage>) {
+    match v {
+        Value::Null => {}
+        Value::String(s) => {
+            if !s.is_empty() {
+                text.push(s.clone());
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|item| collect_content(item, text, images)),
+        Value::Object(o) => {
+            let kind = o.get("type").and_then(Value::as_str).unwrap_or_default();
+            match kind {
+                "text" | "input_text" | "inputText" => {
+                    if let Some(t) = o.get("text").and_then(Value::as_str) {
+                        text.push(t.to_string());
+                    }
+                }
+                "image" | "input_image" | "inputImage" => {
+                    if let Some(image) = image_block(o) {
+                        images.push(image);
+                    }
+                }
+                "resource_link" => {
+                    if let Some(uri) = o.get("uri").and_then(Value::as_str) {
+                        text.push(uri.to_string());
+                    }
+                }
+                "resource" => collect_content(&o["resource"], text, images),
+                // A tool result or an ACP content wrapper.
+                _ if o.contains_key("content") => collect_content(&o["content"], text, images),
+                _ if o.contains_key("contentItems") => collect_content(&o["contentItems"], text, images),
+                _ if o.get("text").is_some_and(Value::is_string) => {
+                    text.push(o["text"].as_str().unwrap_or_default().to_string());
+                }
+                _ => text.push(v.to_string()),
+            }
+        }
+        other => text.push(other.to_string()),
+    }
+}
+
+fn image_block(o: &serde_json::Map<String, Value>) -> Option<ToolImage> {
+    let str_at = |v: Option<&Value>, key: &str| v.and_then(|v| v.get(key)).and_then(Value::as_str).map(String::from);
+    let (mime_type, data) = if let Some(data) = o.get("data").and_then(Value::as_str) {
+        let mime = o.get("mimeType").or(o.get("mime_type")).and_then(Value::as_str).unwrap_or("image/png");
+        (mime.to_string(), data.to_string())
+    } else if let Some(data) = str_at(o.get("source"), "data") {
+        (str_at(o.get("source"), "media_type").unwrap_or_else(|| "image/png".into()), data)
+    } else {
+        // `data:image/png;base64,…`; remote URLs are not fetched.
+        let url = o.get("imageUrl").or(o.get("image_url")).and_then(Value::as_str)?;
+        let (head, data) = url.strip_prefix("data:")?.split_once(";base64,")?;
+        (head.to_string(), data.to_string())
+    };
+    if data.len() > MAX_IMAGE_BYTES {
+        return Some(ToolImage { mime_type, data: String::new(), omitted: true });
+    }
+    Some(ToolImage { mime_type, data, omitted: false })
+}
+
 /// Keep tool output small enough for an event stream.
 pub(crate) fn clip(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -714,5 +792,56 @@ pub(crate) mod rpc {
                 let _ = p.send(Err("process exited".into()));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_tool_result_splits_text_and_images() {
+        // Codex computer-use screenshot, as an MCP CallToolResult.
+        let result = json!({
+            "content": [
+                {"type": "text", "text": "Window: \"Notes\""},
+                {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"}
+            ],
+            "structuredContent": null,
+            "_meta": {"codex/browserUse": true}
+        });
+        let (text, images) = split_content(&result, 1024);
+        assert_eq!(text, "Window: \"Notes\"");
+        assert_eq!(images, vec![ToolImage { mime_type: "image/png".into(), data: "iVBORw0KGgo=".into(), omitted: false }]);
+    }
+
+    #[test]
+    fn anthropic_acp_and_data_url_images() {
+        let claude = json!([{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "/9j/"}}]);
+        assert_eq!(split_content(&claude, 1024).1[0].mime_type, "image/jpeg");
+
+        let acp = json!([{"type": "content", "content": {"type": "image", "data": "AAAA", "mimeType": "image/webp"}}]);
+        assert_eq!(split_content(&acp, 1024).1[0].data, "AAAA");
+
+        let dynamic = json!([{"type": "inputImage", "imageUrl": "data:image/png;base64,QUJD"}, {"type": "inputText", "text": "ok"}]);
+        let (text, images) = split_content(&dynamic, 1024);
+        assert_eq!((text.as_str(), images[0].data.as_str()), ("ok", "QUJD"));
+    }
+
+    #[test]
+    fn oversized_images_are_omitted_and_text_is_clipped() {
+        let big = "A".repeat(MAX_IMAGE_BYTES + 1);
+        let (_, images) = split_content(&json!([{"type": "image", "data": big, "mimeType": "image/png"}]), 1024);
+        assert!(images[0].omitted && images[0].data.is_empty());
+
+        let (text, _) = split_content(&json!("x".repeat(100)), 10);
+        assert!(text.starts_with("xxxxxxxxxx…"));
+    }
+
+    #[test]
+    fn plain_and_unknown_values_stay_text() {
+        assert_eq!(split_content(&json!("a.txt\n"), 1024).0, "a.txt\n");
+        assert_eq!(split_content(&json!({"exit": 0}), 1024).0, r#"{"exit":0}"#);
+        assert_eq!(split_content(&Value::Null, 1024), (String::new(), vec![]));
     }
 }

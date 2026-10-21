@@ -9,7 +9,7 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Child;
 
-use super::{base_command, clip, kill_tree, spawn_frame_reader, spawn_stderr_tail, track, DriverMsg, DriverTx, Protocol, SpawnSpec};
+use super::{base_command, clip, kill_tree, split_content, spawn_frame_reader, spawn_stderr_tail, track, DriverMsg, DriverTx, Protocol, SpawnSpec};
 use crate::protocol::AgentEvent;
 
 pub struct OneShotDriver {
@@ -174,7 +174,7 @@ fn map(proto: Protocol, f: &Value, turn: &mut Turn, limit: usize) -> Vec<DriverM
                     } else {
                         let res = &body["result"];
                         let failed = res.get("error").is_some() || res.get("failure").is_some();
-                        out.push(ev(AgentEvent::ToolEnd { call_id: id, ok: !failed, output: clip(&res.to_string(), limit) }));
+                        out.push(ev(AgentEvent::ToolEnd { call_id: id, ok: !failed, output: clip(&res.to_string(), limit), images: Vec::new() }));
                     }
                 }
                 ("result", _) => {
@@ -226,14 +226,12 @@ fn map(proto: Protocol, f: &Value, turn: &mut Turn, limit: usize) -> Vec<DriverM
                 input: f["args"].clone(),
             })),
             "tool_execution_end" => {
-                let output = match &f["result"] {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
+                let (output, images) = split_content(&f["result"], limit);
                 out.push(ev(AgentEvent::ToolEnd {
                     call_id: f["toolCallId"].as_str().unwrap_or_default().into(),
                     ok: !f["isError"].as_bool().unwrap_or(false),
-                    output: clip(&output, limit),
+                    output,
+                    images,
                 }));
             }
             _ => {}

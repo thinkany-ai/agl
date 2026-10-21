@@ -24,6 +24,7 @@
 | **热会话、复用上下文** | 两轮之间进程不退出；被回收或重启后用原生 resume 接上原对话。实测 claude 每轮首字从约 6s 降到约 1s |
 | **复用会话** | 用名字复用（`-s name`）。CLI、桌面 App、网页共用同一批会话，可以互相接着聊；会话历史落盘，带续传游标 |
 | **并发、排队、steer** | 不同会话并行；同一会话内排队执行，或把消息插入正在进行的一轮（claude、codex） |
+| **Computer use 与 browser use** | Codex 的 computer-use、browser-use 插件经 agl 照常可用：截图通过 `tool_end` 的 `images` 返回，按应用的操作确认以 `permission_request` 下发（`allow_session` 在本会话内记住该应用）。 |
 | **审批** | 四档权限 `full` / `edit` / `ask` / `read_only`。claude、codex、ACP 的权限请求统一转成 `permission_request`，没人回答时超时自动拒绝 |
 | **自动垃圾回收** | 进程数硬上限（按 LRU 驱逐空闲会话）、空闲挂起、过期删除；崩溃后自动清理残留进程 |
 | **稳定性** | 有心跳和卡死检测；中断 10s 后仍未结束就强制结束；API key 冲突时自动改用 CLI 的登录账号；从登录 shell 导入 PATH 和 key |
