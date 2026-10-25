@@ -51,7 +51,22 @@ export interface SessionMeta {
   queued: number; live: boolean; pending_approvals: number; features: string[];
 }
 
-export interface AgentInfo { id: string; name: string; protocol: string; available: boolean; path?: string; version?: string; features: string[] }
+export interface InstallInfo {
+  /** For an installed agent. */
+  source?: "npm" | "bun" | "brew" | "native" | "app-bundle" | "unknown";
+  package?: string; prefix?: string;
+  /** Shell commands for the user to confirm; agl never runs them. */
+  install_command?: string; update_command?: string; guide?: string;
+}
+
+export interface AgentInfo {
+  id: string; name: string; protocol: string; available: boolean; path?: string; version?: string; features: string[];
+  /** Empty from agl ≤0.2. */
+  status?: "ready" | "desktop-only" | "not-found";
+  desktop_app?: string; install?: InstallInfo;
+  /** Only with `check_updates`. */
+  latest_version?: string; update?: "available" | "current" | "unknown";
+}
 
 export interface CreateSession { agent: string; cwd?: string; model?: string; effort?: string; access?: Access; name?: string; resume?: string; warm?: boolean }
 
@@ -173,7 +188,7 @@ export class AglClient {
     }
   }
 
-  agents = () => this.call<AgentInfo[]>("agents.list");
+  agents = (opts: { check_updates?: boolean } = {}) => this.call<AgentInfo[]>("agents.list", opts);
   models = (agent: string) => this.call<{ agent: string; models: { id: string; name?: string; efforts?: string[]; default?: boolean }[] }>("agents.models", { agent });
   createSession = (p: CreateSession) => this.call<SessionMeta>("session.create", p as any);
   sessions = () => this.call<SessionMeta[]>("session.list");

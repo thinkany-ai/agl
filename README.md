@@ -53,6 +53,7 @@ Supported on macOS (Apple silicon and Intel) and Linux (x64 and arm64). Windows 
 
 ```bash
 agl agents                                   # detect installed agents and what each supports
+agl agents --json --check-updates            # the same as JSON, with install source, update command, latest version
 agl models codex                             # list models (does not create a conversation)
 agl run claude "What does this repo do?"     # one turn (the daemon starts in the background)
 agl run claude -s proj --access ask "Fix the failing test"   # named session; ask mode prompts in the terminal
@@ -77,6 +78,7 @@ How each kind of product uses agl:
 | Desktop app (Electron, native), agents only needed while it's open | Bundle agl as a sidecar: `agl daemon --port 0 --parent-pid <pid>` with its own `AGL_HOME` | [desktop-app.md](skills/agl-integration/references/desktop-app.md) |
 | Rust desktop app (Tauri, GPUI) | Link the `agl` crate and use `Manager` in-process | [desktop-app.md#rust-in-process](skills/agl-integration/references/desktop-app.md#rust-in-process) |
 | Web product | The user runs `curl …/install.sh?code=… \| sh`; the machine dials out to your backend | [web-product.md](skills/agl-integration/references/web-product.md) |
+| Any product that only needs the list of installed agents | `agl agents --json` (no daemon), or `agents.list` | [discovery.md](skills/agl-integration/references/discovery.md) |
 | Existing runtime or daemon | Keep your own pairing and transport; replace only the execution layer with agl | [existing-runtime.md](skills/agl-integration/references/existing-runtime.md) |
 
 The full wire protocol is in [protocol.md](skills/agl-integration/references/protocol.md). The client is [clients/typescript/agl.ts](clients/typescript/agl.ts).

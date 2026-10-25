@@ -53,6 +53,7 @@ cargo build --release          # 产物：target/release/agl
 
 ```bash
 agl agents                                   # 检测已安装的 agent 和各自支持的能力
+agl agents --json --check-updates            # 输出 JSON，含安装来源、升级命令、最新版本
 agl models codex                             # 列出可用模型（不会创建对话）
 agl run claude "这个仓库是做什么的？"          # 一次对话（daemon 会自动在后台启动）
 agl run claude -s proj --access ask "修复失败的测试"   # 命名会话；ask 模式会在终端里询问是否允许
@@ -75,6 +76,7 @@ agl status | start | stop
 | 桌面 App（Electron / 原生），关掉 App 就不用 | 作为 sidecar 打包：`agl daemon --port 0 --parent-pid <pid>`，使用独立的 `AGL_HOME` | [desktop-app.md](skills/agl-integration/references/desktop-app.md) |
 | Rust 桌面 App（Tauri / GPUI） | 直接链接 `agl` crate，在进程内使用 `Manager` | [desktop-app.md#rust-in-process](skills/agl-integration/references/desktop-app.md#rust-in-process) |
 | Web 产品 | 用户执行 `curl …/install.sh?code=… \| sh`，机器主动外连到你的后端 | [web-product.md](skills/agl-integration/references/web-product.md) |
+| 只需要本机已安装 agent 列表的产品 | `agl agents --json`（无需 daemon），或 `agents.list` | [discovery.md](skills/agl-integration/references/discovery.md) |
 | 已有自研运行时 / daemon | 保留你的配对和传输层，只把执行层换成 agl | [existing-runtime.md](skills/agl-integration/references/existing-runtime.md) |
 
 协议参考：[protocol.md](skills/agl-integration/references/protocol.md)。客户端：[clients/typescript/agl.ts](clients/typescript/agl.ts)。

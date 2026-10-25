@@ -289,7 +289,7 @@ pub async fn machine_info(cfg: &Config) -> MachineInfo {
         arch: std::env::consts::ARCH.into(),
         version: VERSION.into(),
         protocol: PROTOCOL,
-        agents: agents::detect(cfg).await,
+        agents: agents::detect(cfg, false).await,
     }
 }
 
@@ -307,7 +307,7 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
     Ok(match method {
         "ping" => json!({"pong": true, "version": VERSION, "protocol": PROTOCOL}),
         "machine.info" => serde_json::to_value(machine_info(&mgr.cfg()).await)?,
-        "agents.list" => serde_json::to_value(agents::detect(&mgr.cfg()).await)?,
+        "agents.list" => serde_json::to_value(agents::detect(&mgr.cfg(), params["check_updates"].as_bool().unwrap_or(false)).await)?,
         "agents.models" => agents::list_models(&mgr.cfg(), str_param(&params, "agent")?).await?,
         "daemon.status" => {
             let cfg = mgr.cfg();

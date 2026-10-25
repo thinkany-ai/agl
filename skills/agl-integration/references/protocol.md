@@ -58,7 +58,7 @@ access (default `ask`).
 |---|---|---|
 | `ping` | – | `{pong, version, protocol}` |
 | `machine.info` | – | `{machine_id, hostname, os, arch, version, protocol, agents[]}` |
-| `agents.list` | – | `AgentInfo[]`: `{id, name, protocol, available, path, version, features[]}` |
+| `agents.list` | `{check_updates?}` | `AgentInfo[]`: `{id, name, protocol, available, path, version, features[], status, desktop_app?, install?, latest_version?, update?}`. See [Agent discovery](#agent-discovery). |
 | `agents.models` | `{agent}` | `{agent, models: [{id, name, description?, default?, efforts?[]}]}`. Never starts a conversation the user would see. |
 | `daemon.status` | – | Version, protocol, pid, port, `hubs: [{url, status, access, share_local}]` (a hub sees only its own entry), visible sessions, live processes, defaults |
 | `session.create` | `{agent, cwd?, model?, effort?, access?, name?, resume?, warm?}` | `SessionMeta`. Details: |
@@ -183,6 +183,24 @@ How approval requests are handled:
 | gemini, opencode, kimi, grok, droid, openclaw, hermes, omp | ACP (first-party) | ✓ | ✓ | – (queued) | ✓ (session config) |
 | cursor, pi | one process per turn, native resume | – | – | – | cursor ✓ |
 | custom | `custom_agents` in config, any ACP CLI | ✓ | ✓ | – | ✓ |
+
+## Agent discovery
+
+How to use this in a product: [discovery.md](discovery.md).
+
+`agents.list` (or `agl agents --json`, which needs no daemon) reports every built-in and custom agent:
+
+| field | meaning |
+|---|---|
+| `available`, `path`, `version` | The executable agl runs (login-shell PATH; `AGL_<ID>_BIN` overrides) and the first line of `--version` |
+| `status` | `ready`, `desktop-only` (no CLI, but its macOS desktop app is installed), `not-found` |
+| `desktop_app` | The desktop app that ships the agent, e.g. `/Applications/Cursor.app` |
+| `install.source` | How the found binary was installed: `npm` (with `package`, `prefix`), `bun`, `brew`, `native` (self-updating install), `app-bundle` (the Codex inside Codex.app/ChatGPT.app, updated with the app), `unknown` |
+| `install.install_command` / `update_command` | A shell command for a missing / installed agent, e.g. `npm install --global --prefix '<prefix>' @openai/codex@latest`. Show it to the user to confirm; agl never runs it. |
+| `install.guide` | The agent's install docs |
+| `latest_version`, `update` | Only with `check_updates: true` (`agl agents --check-updates`): the newest published version (npm, GitHub releases, the vendor's channel) and `available`, `current` or `unknown`. Unparseable versions are `unknown`, never `current`. Takes a few seconds and goes through the user's proxy. |
+
+Custom agents carry no `install` or update fields. Detection only reads; nothing is installed or launched other than `<agent> --version`.
 
 ## Configuration (`$AGL_HOME/config.json`)
 

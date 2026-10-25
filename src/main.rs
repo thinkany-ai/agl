@@ -116,8 +116,15 @@ enum Cmd {
         #[arg(long)]
         idle: bool,
     },
-    /// Detect installed agents
-    Agents,
+    /// Detect installed agents (no daemon needed)
+    Agents {
+        /// Print the detection as JSON (`AgentInfo[]`, as `agents.list` returns it)
+        #[arg(long)]
+        json: bool,
+        /// Also look up each agent's newest published version (network)
+        #[arg(long)]
+        check_updates: bool,
+    },
     /// Run the daemon in the foreground
     Daemon {
         /// Port on 127.0.0.1 (0 = any free port; see daemon.json)
@@ -236,16 +243,27 @@ async fn real_main() -> Result<()> {
             Ok(())
         }
         Cmd::Status => status(&cfg).await,
-        Cmd::Agents => {
-            for a in agents::detect(&cfg).await {
+        Cmd::Agents { json, check_updates } => {
+            let list = agents::detect(&cfg, check_updates).await;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&list)?);
+                return Ok(());
+            }
+            for a in list {
                 if a.available {
+                    let update = match (a.update.as_deref(), a.latest_version.as_deref()) {
+                        (Some("available"), Some(v)) => format!("  → {v}"),
+                        _ => String::new(),
+                    };
                     println!(
-                        "{:<9} ✓ {:<34} {:<8} {}",
+                        "{:<9} ✓ {:<34} {:<8} {}{update}",
                         a.id,
                         a.version.unwrap_or_default().chars().take(34).collect::<String>(),
                         a.protocol,
                         dim(&a.features.join(","))
                     );
+                } else if let Some(app) = a.desktop_app {
+                    println!("{:<9} ✗ {}", a.id, dim(&format!("desktop app only: {app}")));
                 } else {
                     println!("{:<9} ✗ {}", a.id, dim("not installed"));
                 }

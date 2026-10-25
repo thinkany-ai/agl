@@ -17,6 +17,7 @@
 mod acp;
 mod claude;
 mod codex;
+mod install;
 mod oneshot;
 
 use std::collections::HashMap;
@@ -308,23 +309,48 @@ impl Driver {
     }
 }
 
-/// Probe every registered agent concurrently (bounded per probe).
-pub async fn detect(cfg: &Config) -> Vec<AgentInfo> {
+/// Probe every registered agent concurrently (bounded per probe). With
+/// `check_updates`, also look up each installed agent's newest published
+/// version (network).
+pub async fn detect(cfg: &Config, check_updates: bool) -> Vec<AgentInfo> {
     let defs = registry(cfg);
-    let probes = defs.into_iter().map(|d| async move {
-        let path = find_binary(&d);
-        let version = match &path {
-            Some(p) => version_of(p).await,
-            None => None,
-        };
-        AgentInfo {
-            id: d.id.clone(),
-            name: d.name.clone(),
-            protocol: d.protocol.name().into(),
-            available: path.is_some(),
-            path: path.map(|p| p.display().to_string()),
-            version,
-            features: d.protocol.features(),
+    let custom: Vec<String> = cfg.custom_agents.iter().map(|c| c.id.clone()).collect();
+    let probes = defs.into_iter().map(|d| {
+        // A custom agent is the user's own command, not the built-in one.
+        let builtin = !custom.contains(&d.id);
+        async move {
+            let path = find_binary(&d);
+            let (version, latest_version) = match &path {
+                Some(p) => {
+                    let latest = async { if check_updates && builtin { install::latest_version(&d.id).await } else { None } };
+                    tokio::join!(version_of(p), latest)
+                }
+                None => (None, None),
+            };
+            let desktop_app = builtin.then(|| install::desktop_app(&d.id)).flatten();
+            let status = if path.is_some() {
+                "ready"
+            } else if desktop_app.is_some() {
+                "desktop-only"
+            } else {
+                "not-found"
+            };
+            let update = (check_updates && builtin && path.is_some())
+                .then(|| install::update_status(&d.id, version.as_deref(), latest_version.as_deref()).to_string());
+            AgentInfo {
+                id: d.id.clone(),
+                name: d.name.clone(),
+                protocol: d.protocol.name().into(),
+                available: path.is_some(),
+                install: builtin.then(|| install::install_info(&d.id, path.as_deref())).flatten(),
+                path: path.map(|p| p.display().to_string()),
+                version,
+                features: d.protocol.features(),
+                status: status.into(),
+                desktop_app: desktop_app.map(|p| p.display().to_string()),
+                latest_version,
+                update,
+            }
         }
     });
     futures_util::future::join_all(probes).await

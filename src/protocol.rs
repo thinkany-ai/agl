@@ -181,6 +181,44 @@ pub struct AgentInfo {
     /// What agl can do with it: warm (persistent process), approvals, steer, models.
     #[serde(default)]
     pub features: Vec<String>,
+    /// ready | desktop-only (only its desktop app is installed) | not-found.
+    /// Empty from agl ≤0.2.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status: String,
+    /// The desktop app that ships this agent (macOS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_app: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<InstallInfo>,
+    /// Only when updates were checked: the newest published version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_version: Option<String>,
+    /// Only when updates were checked: available | current | unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<String>,
+}
+
+/// How an agent is installed or updated. Commands are shell commands for the
+/// user to confirm; agl never runs them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstallInfo {
+    /// For an installed agent: npm | bun | brew | native | app-bundle | unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// npm package.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+    /// npm global prefix the installed CLI lives in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    /// For a missing agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_command: Option<String>,
+    /// For an installed agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guide: Option<String>,
 }
 
 pub fn now_ms() -> u64 {

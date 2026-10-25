@@ -25,6 +25,7 @@ Your product never parses agent output itself.
 | Rust desktop app (Tauri, GPUI) | **In-process**: depend on the `agl` crate and use `agl::session::Manager` | Rust code directly; no port, no token | [desktop-app.md](references/desktop-app.md#rust-in-process) |
 | Desktop app that must stay reachable when closed, or that shares sessions with the user's terminal | **Shared daemon** in `~/.agl` with autostart (`agl service install`) | App over localhost; the web through a hub | [desktop-app.md](references/desktop-app.md#shared-daemon) |
 | Web product that uses agents on users' machines | **Installed daemon**: `curl …/install.sh?code=… \| sh`; the machine dials out to your server | Your backend over the machine link; browsers through your backend | [web-product.md](references/web-product.md) |
+| Product that only needs the list of installed agents (an "agents" settings screen) | Nowhere persistent: run `agl agents --json` | Any process that can spawn a binary | [discovery.md](references/discovery.md) |
 | Product that already has its own runtime or daemon (pairing, queue, transport) | **Execution engine** under your runtime: keep your pairing and transport, replace the per-CLI runners with agl calls | Your runtime process over localhost | [existing-runtime.md](references/existing-runtime.md) |
 
 When unsure, ask one question: *must the agent be reachable when the user's
@@ -39,9 +40,12 @@ app is closed?*
      dependencies and works in Node, Electron main and browsers.
    - Any other language: the protocol is plain JSON over WebSocket. See
      [protocol.md](references/protocol.md).
-2. **Discover.** `agents.list` returns availability and `features`, and
-   `agents.models {agent}` returns model lists. Base your UI on `features`
-   (`steer`, `approvals`, …). Do not hardcode per-agent behaviour.
+2. **Discover.** `agents.list` (or `agl agents --json`, no daemon needed)
+   returns each agent's availability, version, `features`, install source and
+   install/update command, and with `check_updates` the latest version. See
+   [discovery.md](references/discovery.md). `agents.models {agent}` returns
+   model lists. Base your UI on `features` (`steer`, `approvals`, …). Do not
+   hardcode per-agent behaviour or write your own detection.
 3. **Create or reuse a session.**
    - Call `session.create {agent, cwd, model?, access, name?, warm: true}`.
    - Use a stable `name` such as `"<your-thread-id>"` so the same thread maps to
