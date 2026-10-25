@@ -116,11 +116,12 @@ fn is_unauthorized(e: &anyhow::Error) -> bool {
 
 /// Swap the link's pairing code for the token the hub issued. The changed
 /// entry restarts the link through `supervise`.
-pub(crate) fn store_token(d: &Daemon, hub: &str, token: String) -> Result<()> {
+pub(crate) fn store_token(d: &Daemon, hub: &str, token: String, max_body: Option<usize>) -> Result<()> {
     let mut fresh = Config::load()?;
     let Some(entry) = fresh.hubs.iter_mut().find(|h| h.url == hub) else { bail!("hub was removed while pairing") };
     entry.token = Some(token);
     entry.pair_code = None;
+    entry.max_body = max_body;
     fresh.save()?;
     *d.mgr.cfg.write().unwrap() = fresh;
     eprintln!("hub link {hub}: paired");
@@ -154,7 +155,7 @@ async fn connect_once(d: &Arc<Daemon>, link: &HubLink, kind: &str, secret: &str)
         let first = tokio::time::timeout(Duration::from_secs(15), stream.next()).await.context("pairing timed out")?;
         let Some(Ok(Message::Text(text))) = first else { bail!("hub closed the connection during pairing") };
         let Ok(WireMsg::Paired { token }) = serde_json::from_str::<WireMsg>(&text) else { bail!("unexpected pairing reply") };
-        return store_token(d, hub, token);
+        return store_token(d, hub, token, None);
     }
     sink.send(Message::Text(WireMsg::Hello { machine: machine_info(&cfg).await }.to_json().into())).await?;
     set_status(d, hub, "connected");

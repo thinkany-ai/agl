@@ -69,6 +69,9 @@ struct Outbox {
     seqs: HashMap<String, u64>,
 }
 
+/// (machine_id, message id) of a message arriving in parts.
+type PartKey = (String, String);
+
 struct Pending {
     ui: u64,
     id: String,
@@ -93,6 +96,9 @@ struct MachineRecord {
 
 struct Hub {
     token: String,
+    /// Request body limit announced to HTTP machines (as behind a WAF).
+    max_body: Option<usize>,
+    parts: Mutex<HashMap<PartKey, Vec<Option<Vec<u8>>>>>,
     public_url: Option<String>,
     dist: Option<PathBuf>,
     /// Where binaries not in `dist` come from (GitHub Releases by default).
@@ -129,7 +135,14 @@ fn store_path() -> PathBuf {
 
 pub const DEFAULT_RELEASE_URL: &str = "https://github.com/thinkany-ai/agl/releases/latest/download";
 
-pub async fn run(listen: String, public_url: Option<String>, token: Option<String>, dist: Option<PathBuf>, release_url: Option<String>) -> Result<()> {
+pub async fn run(
+    listen: String,
+    public_url: Option<String>,
+    token: Option<String>,
+    dist: Option<PathBuf>,
+    release_url: Option<String>,
+    max_body: Option<usize>,
+) -> Result<()> {
     std::fs::create_dir_all(config::home())?;
     let mut store: Persisted = std::fs::read_to_string(store_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     if let Some(t) = token {
@@ -141,6 +154,8 @@ pub async fn run(listen: String, public_url: Option<String>, token: Option<Strin
     config::write_private(&store_path(), serde_json::to_string_pretty(&store)?.as_bytes())?;
     let hub = Arc::new(Hub {
         token: store.token.clone(),
+        max_body,
+        parts: Mutex::default(),
         public_url: public_url.map(|u| u.trim_end_matches('/').to_string()),
         dist,
         release_url: release_url.filter(|u| !u.is_empty()).map(|u| u.trim_end_matches('/').to_string()),
@@ -161,6 +176,7 @@ pub async fn run(listen: String, public_url: Option<String>, token: Option<Strin
         .route("/machine/send", post(http_send))
         .route("/machine/poll", post(http_poll))
         .route("/ws/ui", get(ui_ws))
+        .layer(axum::middleware::from_fn_with_state(hub.clone(), body_limit))
         .with_state(hub.clone());
     tokio::spawn(reap_http_machines(hub.clone()));
     let listener = tokio::net::TcpListener::bind(&listen).await.with_context(|| format!("bind {listen}"))?;
@@ -462,7 +478,16 @@ async fn http_pair(State(hub): State<Arc<Hub>>, Json(b): Json<PairBody>) -> Resp
     if !hub.take_code(&b.code) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    Json(json!({"token": hub.issue_token(&b.machine_id)})).into_response()
+    Json(json!({"token": hub.issue_token(&b.machine_id), "max_body": hub.max_body})).into_response()
+}
+
+/// Refuse bodies over `--max-body` the way a WAF in front of a hub would.
+async fn body_limit(State(hub): State<Arc<Hub>>, req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let len = req.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<usize>().ok());
+    match (hub.max_body, len) {
+        (Some(max), Some(len)) if len > max => StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+        _ => next.run(req).await,
+    }
 }
 
 /// The machine a send or poll comes from, by its token.
@@ -491,33 +516,62 @@ async fn http_send(State(hub): State<Arc<Hub>>, headers: HeaderMap, Json(b): Jso
         Err(status) => return status.into_response(),
     };
     for m in b.messages {
-        let Ok(msg) = serde_json::from_value::<WireMsg>(m) else { continue };
-        match msg {
-            WireMsg::Hello { mut machine } => {
-                // A machine speaks only for itself.
-                machine.machine_id = machine_id.clone();
-                http_hello(&hub, machine);
-            }
-            WireMsg::Event(env) => {
-                let fresh = {
-                    let mut boxes = hub.outboxes.lock().unwrap();
-                    let Some(o) = boxes.get_mut(&machine_id) else { continue };
-                    let last = o.seqs.entry(env.session_id.clone()).or_insert(0);
-                    let fresh = env.seq > *last;
-                    *last = (*last).max(env.seq);
-                    fresh
-                };
-                if fresh {
-                    hub.relay(&machine_id, WireMsg::Event(env));
-                }
-            }
-            other => hub.relay(&machine_id, other),
+        if let Ok(msg) = serde_json::from_value::<WireMsg>(m) {
+            http_message(&hub, &machine_id, msg);
         }
     }
     if let Some(o) = hub.outboxes.lock().unwrap().get_mut(&machine_id) {
         o.seen = Instant::now();
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+fn http_message(hub: &Arc<Hub>, machine_id: &str, msg: WireMsg) {
+    match msg {
+        WireMsg::Hello { mut machine } => {
+            // A machine speaks only for itself.
+            machine.machine_id = machine_id.to_string();
+            http_hello(hub, machine);
+        }
+        WireMsg::Event(env) => {
+            let fresh = {
+                let mut boxes = hub.outboxes.lock().unwrap();
+                let Some(o) = boxes.get_mut(machine_id) else { return };
+                let last = o.seqs.entry(env.session_id.clone()).or_insert(0);
+                let fresh = env.seq > *last;
+                *last = (*last).max(env.seq);
+                fresh
+            };
+            if fresh {
+                hub.relay(machine_id, WireMsg::Event(env));
+            }
+        }
+        WireMsg::Part { id, index, count, data } => {
+            let Ok(bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data.as_bytes()) else { return };
+            if count == 0 || count > 100_000 || index >= count {
+                return;
+            }
+            let whole = {
+                let mut parts = hub.parts.lock().unwrap();
+                let key = (machine_id.to_string(), id);
+                let slots = parts.entry(key.clone()).or_insert_with(|| vec![None; count as usize]);
+                if slots.len() != count as usize {
+                    return;
+                }
+                slots[index as usize] = Some(bytes);
+                if slots.iter().any(Option::is_none) {
+                    return;
+                }
+                parts.remove(&key).unwrap_or_default().into_iter().flatten().flatten().collect::<Vec<u8>>()
+            };
+            if let Ok(msg) = serde_json::from_slice::<WireMsg>(&whole) {
+                if !matches!(msg, WireMsg::Part { .. }) {
+                    http_message(hub, machine_id, msg);
+                }
+            }
+        }
+        other => hub.relay(machine_id, other),
+    }
 }
 
 fn http_hello(hub: &Arc<Hub>, machine: MachineInfo) {
@@ -616,7 +670,7 @@ async fn http_poll(State(hub): State<Arc<Hub>>, headers: HeaderMap, Json(b): Jso
     };
     let cursor = batch.last().map(|(c, _)| *c).or(b.ack);
     let messages: Vec<Value> = batch.iter().filter_map(|(_, s)| serde_json::from_str(s).ok()).collect();
-    Json(json!({"messages": messages, "cursor": cursor})).into_response()
+    Json(json!({"messages": messages, "cursor": cursor, "max_body": hub.max_body})).into_response()
 }
 
 /// Take HTTP machines that stopped polling offline.

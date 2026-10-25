@@ -193,6 +193,10 @@ enum Cmd {
         /// Redirect downloads not found in --dist here ("" to disable)
         #[arg(long, default_value = hub::DEFAULT_RELEASE_URL)]
         release_url: String,
+        /// Refuse request bodies over this many bytes and tell HTTP machines so
+        /// (to try a hub that sits behind a WAF)
+        #[arg(long)]
+        max_body: Option<usize>,
     },
 }
 
@@ -216,7 +220,7 @@ async fn real_main() -> Result<()> {
     let mut cfg = Config::load()?;
     match cli.cmd {
         Cmd::Daemon { port, parent_pid, token } => daemon::run(cfg, daemon::DaemonOptions { port, parent_pid, token }).await,
-        Cmd::Hub { listen, public_url, token, dist, release_url } => hub::run(listen, public_url, token, dist, Some(release_url)).await,
+        Cmd::Hub { listen, public_url, token, dist, release_url, max_body } => hub::run(listen, public_url, token, dist, Some(release_url), max_body).await,
         Cmd::Start => {
             let c = ensure_daemon(&cfg).await?;
             let st = c.call("daemon.status", json!({})).await?;

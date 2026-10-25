@@ -41,9 +41,9 @@ Every call is a `POST` with a JSON body. After pairing, each carries
 
 | call | body | answer |
 |---|---|---|
-| `<hub>/machine/pair` | `{machine_id, code}` | `{token}`: the machine's own token. 401 for an invalid or used code. |
+| `<hub>/machine/pair` | `{machine_id, code}` | `{token, max_body?}`: the machine's own token, and the largest request body you accept. 401 for an invalid or used code. |
 | `<hub>/machine/send` | `{messages: [...]}` | 2xx. `hello` first after every (re)connect, then `response` and `event` messages in the order they happened. |
-| `<hub>/machine/poll` | `{ack, wait_ms}` | `{messages: [request…], cursor}`. Held open up to `wait_ms` (25 000) until there is a request; empty `messages` on timeout. |
+| `<hub>/machine/poll` | `{ack, wait_ms}` | `{messages: [request…], cursor, max_body?}`. Held open up to `wait_ms` (25 000) until there is a request; empty `messages` on timeout. |
 
 Delivery:
 - **Requests, hub → machine.** Give each queued request a cursor that
@@ -53,6 +53,14 @@ Delivery:
   it. Anything not yet acknowledged is delivered again, and the machine
   answers a request id it has already run from a cache instead of running it
   twice, so redelivering is always safe.
+- **Size limit.** If something in front of you refuses large bodies (an AWS
+  WAF stops at 8 KiB), say so with `max_body` (bytes, 1024 to 262144) when
+  pairing and on polls. The machine keeps every request under it and sends a
+  message too large for it as `part {id, index, count, data}` messages:
+  `data` is base64 of the message JSON's bytes from `index` of `count` equal
+  slices. Keep the parts of an `id` (they can reach different instances),
+  join them in `index` order once all are there, and read the result as the
+  message it is. Responses to the machine are not limited.
 - **Messages, machine → hub.** Batches of up to 500 messages or 256 KiB; a
   batch that failed is sent again. Drop a `response` whose `id` you no longer
   wait for, and an `event` whose `seq` is not above the last one you have for
@@ -101,7 +109,7 @@ access (default `ask`).
 | method | params | result / notes |
 |---|---|---|
 | `ping` | – | `{pong, version, protocol}` |
-| `machine.info` | – | `{machine_id, hostname, os, arch, version, protocol, agents[]}` |
+| `machine.info` | – | `{machine_id, hostname, os, arch, version, protocol, agents[], home, started_at}`. `home` is the user's home directory; `started_at` (unix ms) changes when the daemon restarts, which ends every running turn: a hub that sees a new value in `hello` can fail the turns it was waiting for. |
 | `agents.list` | `{check_updates?}` | `AgentInfo[]`: `{id, name, protocol, available, path, version, features[], status, desktop_app?, install?, latest_version?, update?}`. See [Agent discovery](#agent-discovery). |
 | `agents.models` | `{agent}` | `{agent, models: [{id, name, description?, default?, efforts?[]}]}`. Never starts a conversation the user would see. |
 | `daemon.status` | – | Version, protocol, pid, port, `hubs: [{url, status, access, share_local}]` (a hub sees only its own entry), visible sessions, live processes, defaults |
@@ -123,6 +131,13 @@ access (default `ask`).
 | `session.get` / `session.list` | `{session_id}` / – | `SessionMeta` / `SessionMeta[]`, most recent first |
 | `session.history` | `{session_id, after_seq?, limit?}` | `EventEnvelope[]`. Consecutive `text_delta` events are merged. History is persisted, so it survives a daemon restart. |
 | `session.close` | `{session_id}` | Kills the process and deletes the session. |
+| `fs.read` | `{path}` | `{content_base64, size}`. `path` is absolute or `~/…`; up to 100 MB. |
+| `fs.write` | `{path, content_base64}` | `{size}`. Creates parent directories and replaces the file atomically. |
+| `exec` | `{argv, cwd?, timeout_ms?, env?, stdin?}` | `{stdout, stderr, exit_code, timed_out, truncated}`. Runs `argv` without a shell, with the agents' environment (login-shell PATH), in its own process group; on timeout (default 10 min, max 30) the whole tree is killed. Output is kept up to 16 MiB per stream. |
+
+A hub gets `fs.*` and `exec` only as far as its link's access allows, since
+nobody is asked first: any link may `fs.read`, `edit` and `full` links may
+`fs.write`, and only `full` links may `exec`.
 
 `session_id` accepts any of: the id, the session name, or an id prefix of at
 least 4 characters.

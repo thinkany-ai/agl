@@ -94,6 +94,10 @@ pub struct HubLink {
     /// hold a socket per machine).
     #[serde(default = "default_transport")]
     pub transport: String,
+    /// Largest request body the hub accepts (HTTP link), as it said when
+    /// pairing; bigger messages are sent in parts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_body: Option<usize>,
 }
 
 pub const TRANSPORTS: [&str; 2] = ["ws", "http"];
@@ -112,7 +116,7 @@ fn default_true() -> bool {
 
 impl HubLink {
     pub fn new(url: &str) -> HubLink {
-        HubLink { url: normalize_url(url), token: None, pair_code: None, access: default_remote_access(), share_local: true, transport: default_transport() }
+        HubLink { url: normalize_url(url), token: None, pair_code: None, access: default_remote_access(), share_local: true, transport: default_transport(), max_body: None }
     }
 }
 

@@ -11,6 +11,7 @@ pub mod daemon;
 pub mod hub;
 pub mod link;
 pub mod link_http;
+pub mod machine;
 pub mod protocol;
 pub mod proxy;
 pub mod service;

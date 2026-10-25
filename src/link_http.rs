@@ -3,9 +3,12 @@
 //! a serverless host. The messages are the WebSocket link's; only the
 //! transport differs (protocol.md, "HTTP link").
 //!
-//! - `POST <hub>/machine/pair {machine_id, code}` → `{token}`
+//! - `POST <hub>/machine/pair {machine_id, code}` → `{token, max_body?}`
 //! - `POST <hub>/machine/send {messages}`         hello, responses, events
-//! - `POST <hub>/machine/poll {ack, wait_ms}`     → `{messages, cursor}`: requests
+//! - `POST <hub>/machine/poll {ack, wait_ms}`     → `{messages, cursor, max_body?}`: requests
+//!
+//! A hub behind a WAF may cap request bodies (`max_body`). Batches stay under
+//! it, and a single message too large for it goes as `part` messages.
 //!
 //! Delivery is at least once both ways. The hub redelivers requests until a
 //! poll acknowledges their cursor, so a repeated request id is answered from
@@ -14,8 +17,11 @@
 //! by `session_id` + `seq`).
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use base64::Engine;
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -29,9 +35,16 @@ use crate::session::Origin;
 
 /// How long the hub may hold a poll open.
 pub const POLL_WAIT_MS: u64 = 25_000;
-/// Limits of one `send` batch.
+/// Limits of one `send` batch: messages, and body bytes unless the hub
+/// asks for less.
 const BATCH_MAX: usize = 500;
-const BATCH_BYTES: usize = 256 * 1024;
+const BODY_MAX: usize = 256 * 1024;
+/// Below this a hub's limit is not usable.
+const BODY_MIN: usize = 1024;
+/// `{"messages":[` … `]}`.
+const ENVELOPE: usize = 16;
+/// A part's own fields around its data.
+const PART_OVERHEAD: usize = 160;
 /// How long a batch waits for more output once it has some.
 const BATCH_WINDOW: Duration = Duration::from_millis(50);
 const SEND_ATTEMPTS: u32 = 3;
@@ -121,7 +134,17 @@ impl Http {
     }
 
     async fn post(&self, path: &str, body: &Value, timeout: Duration) -> Result<Value> {
-        let mut req = self.client.post(format!("{}{path}", self.base)).timeout(timeout).header("x-agl-machine-id", &self.machine_id).json(body);
+        self.post_raw(path, body.to_string(), timeout).await
+    }
+
+    async fn post_raw(&self, path: &str, body: String, timeout: Duration) -> Result<Value> {
+        let mut req = self
+            .client
+            .post(format!("{}{path}", self.base))
+            .timeout(timeout)
+            .header("x-agl-machine-id", &self.machine_id)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
         if let Some(t) = &self.token {
             req = req.bearer_auth(t);
         }
@@ -148,31 +171,96 @@ pub async fn connect_once(d: &Arc<Daemon>, link: &HubLink, kind: &str, secret: &
         let http = Http::new(hub, &cfg.machine_id, None)?;
         let r = http.post("/machine/pair", &json!({"machine_id": cfg.machine_id, "code": secret}), Duration::from_secs(15)).await?;
         let Some(token) = r["token"].as_str() else { bail!("unexpected pairing reply") };
-        return store_token(d, hub, token.to_string());
+        return store_token(d, hub, token.to_string(), body_limit(&r));
     }
     let http = Http::new(hub, &cfg.machine_id, Some(secret.to_string()))?;
+    let limit = Arc::new(AtomicUsize::new(link.max_body.map_or(BODY_MAX, |n| n.clamp(BODY_MIN, BODY_MAX))));
     // Subscribe before `hello` so no event falls in between.
     let bus = d.mgr.bus.subscribe();
     let hello = WireMsg::Hello { machine: machine_info(&cfg).await };
-    http.post("/machine/send", &json!({"messages": [hello]}), Duration::from_secs(30)).await?;
+    // In parts too if it must: a machine with many agents says a lot.
+    for body in batches(&mut encode(&hello, limit.load(Ordering::Relaxed))?.into(), limit.load(Ordering::Relaxed)) {
+        http.post_raw("/machine/send", body, Duration::from_secs(30)).await?;
+    }
     set_status(d, hub, "connected");
     eprintln!("hub link {hub}: connected (http)");
 
     let origin = Origin::Hub { url: hub.clone(), share_local: link.share_local };
     let (out_tx, out_rx) = mpsc::unbounded_channel::<WireMsg>();
     tokio::select! {
-        r = poll_loop(d, &http, &origin, out_tx, state) => r,
-        r = send_loop(d, &http, &origin, out_rx, bus) => r,
+        r = poll_loop(d, &http, &origin, out_tx, state, &limit) => r,
+        r = send_loop(d, &http, &origin, out_rx, bus, &limit) => r,
     }
+}
+
+/// The request size limit a hub announced, if usable.
+fn body_limit(v: &Value) -> Option<usize> {
+    v["max_body"].as_u64().map(|n| (n as usize).clamp(BODY_MIN, BODY_MAX))
+}
+
+/// A message as JSON, or as parts that each fit a request of `limit` bytes.
+fn encode(msg: &WireMsg, limit: usize) -> Result<Vec<String>> {
+    let json = serde_json::to_string(msg)?;
+    if json.len() + ENVELOPE <= limit {
+        return Ok(vec![json]);
+    }
+    let per_part = (limit - ENVELOPE - PART_OVERHEAD) / 4 * 3;
+    let bytes = json.as_bytes();
+    let count = bytes.len().div_ceil(per_part);
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    bytes
+        .chunks(per_part)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let part = WireMsg::Part {
+                id: id.clone(),
+                index: index as u32,
+                count: count as u32,
+                data: base64::engine::general_purpose::STANDARD.encode(chunk),
+            };
+            Ok(serde_json::to_string(&part)?)
+        })
+        .collect()
+}
+
+/// Take encoded messages off the front of `queue` into request bodies of at
+/// most `limit` bytes (an encoded message always fits one on its own).
+fn batches(queue: &mut VecDeque<String>, limit: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    while !queue.is_empty() {
+        out.push(next_batch(queue, limit));
+    }
+    out
+}
+
+fn next_batch(queue: &mut VecDeque<String>, limit: usize) -> String {
+    let mut body = String::from("{\"messages\":[");
+    let mut taken = 0;
+    while let Some(front) = queue.front() {
+        if taken > 0 && (taken >= BATCH_MAX || body.len() + front.len() + 1 + 2 > limit) {
+            break;
+        }
+        if taken > 0 {
+            body.push(',');
+        }
+        body.push_str(front);
+        queue.pop_front();
+        taken += 1;
+    }
+    body.push_str("]}");
+    body
 }
 
 /// Receive the hub's requests and run them. Each poll acknowledges the
 /// previous one's messages.
-async fn poll_loop(d: &Arc<Daemon>, http: &Http, origin: &Origin, out: mpsc::UnboundedSender<WireMsg>, state: &mut State) -> Result<()> {
+async fn poll_loop(d: &Arc<Daemon>, http: &Http, origin: &Origin, out: mpsc::UnboundedSender<WireMsg>, state: &mut State, limit: &AtomicUsize) -> Result<()> {
     loop {
         let r = http
             .post("/machine/poll", &json!({"ack": state.ack, "wait_ms": POLL_WAIT_MS}), Duration::from_millis(POLL_WAIT_MS + 15_000))
             .await?;
+        if let Some(n) = body_limit(&r) {
+            limit.store(n, Ordering::Relaxed);
+        }
         for m in r["messages"].as_array().into_iter().flatten() {
             let Ok(WireMsg::Request { id, method, params }) = serde_json::from_value::<WireMsg>(m.clone()) else { continue };
             match state.seen.lock().unwrap().begin(&id) {
@@ -204,27 +292,27 @@ async fn send_loop(
     origin: &Origin,
     mut out: mpsc::UnboundedReceiver<WireMsg>,
     mut bus: broadcast::Receiver<EventEnvelope>,
+    limit: &AtomicUsize,
 ) -> Result<()> {
+    let mut queue: VecDeque<String> = VecDeque::new();
     loop {
-        let first = next_out(d, origin, &mut out, &mut bus).await?;
-        let mut bytes = serde_json::to_string(&first)?.len();
-        let mut batch = vec![first];
+        let max = limit.load(Ordering::Relaxed);
+        if queue.is_empty() {
+            let m = next_out(d, origin, &mut out, &mut bus).await?;
+            queue.extend(encode(&m, max)?);
+        }
         // A burst of deltas goes out as one request.
         let window = tokio::time::Instant::now() + BATCH_WINDOW;
-        while batch.len() < BATCH_MAX && bytes < BATCH_BYTES {
+        while queue.len() < BATCH_MAX && queue.iter().map(String::len).sum::<usize>() < max {
             match tokio::time::timeout_at(window, next_out(d, origin, &mut out, &mut bus)).await {
-                Ok(m) => {
-                    let m = m?;
-                    bytes += serde_json::to_string(&m)?.len();
-                    batch.push(m);
-                }
+                Ok(m) => queue.extend(encode(&m?, max)?),
                 Err(_) => break,
             }
         }
-        let body = json!({ "messages": batch });
+        let body = next_batch(&mut queue, max);
         let mut attempt = 1;
         loop {
-            match http.post("/machine/send", &body, Duration::from_secs(30)).await {
+            match http.post_raw("/machine/send", body.clone(), Duration::from_secs(30)).await {
                 Ok(_) => break,
                 Err(e) if attempt >= SEND_ATTEMPTS || e.chain().any(|c| c.is::<Unauthorized>()) => return Err(e),
                 Err(_) => {
@@ -267,6 +355,30 @@ mod tests {
         assert_eq!(http_url("wss://app.example.com").unwrap(), "https://app.example.com");
         assert_eq!(http_url("ws://127.0.0.1:8787").unwrap(), "http://127.0.0.1:8787");
         assert!(http_url("app.example.com").is_err());
+    }
+
+    #[test]
+    fn large_messages_go_in_parts_that_fit() {
+        let limit = 2048;
+        let text = "x".repeat(10_000);
+        let msg = WireMsg::Response { id: "r1".into(), result: Some(json!({"text": text})), error: None };
+        let parts = encode(&msg, limit).unwrap();
+        assert!(parts.len() > 1);
+        let mut joined = Vec::new();
+        for (i, p) in parts.iter().enumerate() {
+            assert!(p.len() + ENVELOPE <= limit, "part {i} is {} bytes", p.len());
+            let Ok(WireMsg::Part { index, count, data, .. }) = serde_json::from_str::<WireMsg>(p) else { panic!("not a part") };
+            assert_eq!((index as usize, count as usize), (i, parts.len()));
+            joined.extend(base64::engine::general_purpose::STANDARD.decode(data).unwrap());
+        }
+        assert!(matches!(serde_json::from_slice::<WireMsg>(&joined).unwrap(), WireMsg::Response { .. }));
+
+        let mut queue: VecDeque<String> = parts.into_iter().chain(std::iter::repeat_n("{\"type\":\"x\"}".to_string(), 300)).collect();
+        for body in batches(&mut queue, limit) {
+            assert!(body.len() <= limit, "batch of {} bytes", body.len());
+            serde_json::from_str::<Value>(&body).unwrap();
+        }
+        assert_eq!(encode(&WireMsg::Paired { token: "t".into() }, limit).unwrap().len(), 1);
     }
 
     #[test]

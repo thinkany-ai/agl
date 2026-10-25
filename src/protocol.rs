@@ -39,6 +39,15 @@ pub enum WireMsg {
     Paired {
         token: String,
     },
+    /// One piece of a message too large for the hub's request size limit
+    /// (HTTP link): `data` is base64 of bytes `index` of `count` of the
+    /// message's JSON, which the hub joins and reads once it has them all.
+    Part {
+        id: String,
+        index: u32,
+        count: u32,
+        data: String,
+    },
 }
 
 impl WireMsg {
@@ -163,6 +172,13 @@ pub struct MachineInfo {
     #[serde(default)]
     pub protocol: u32,
     pub agents: Vec<AgentInfo>,
+    /// The user's home directory, for hubs that address files under it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub home: String,
+    /// When this daemon started (unix ms). A new value means it restarted, so
+    /// no turn the hub saw running on the old one is running any more.
+    #[serde(default)]
+    pub started_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

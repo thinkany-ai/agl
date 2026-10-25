@@ -114,7 +114,7 @@ impl Browser {
     }
 }
 
-async fn linked_machine_runs_a_turn(transport: &str) {
+async fn linked_machine_runs_a_turn(transport: &str, max_body: Option<usize>) {
     let hub_home = temp_home("hub");
     let machine_home = temp_home("machine");
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mock_acp.py");
@@ -130,8 +130,12 @@ async fn linked_machine_runs_a_turn(transport: &str) {
     .unwrap();
 
     let port = free_port();
-    let hub = agl(&hub_home)
-        .args(["hub", "--listen", &format!("127.0.0.1:{port}"), "--token", ADMIN, "--release-url", ""])
+    let mut hub = agl(&hub_home);
+    hub.args(["hub", "--listen", &format!("127.0.0.1:{port}"), "--token", ADMIN, "--release-url", ""]);
+    if let Some(n) = max_body {
+        hub.args(["--max-body", &n.to_string()]);
+    }
+    let hub = hub
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -174,6 +178,20 @@ async fn linked_machine_runs_a_turn(transport: &str) {
     let ended = events.iter().find(|e| e["event"]["kind"] == "turn_ended").unwrap();
     assert_eq!(ended["event"]["outcome"], "completed", "{ended}");
 
+    // Files and commands on the machine; over a small body limit the file
+    // comes back in parts.
+    let dir = machine_home.join("files");
+    let content = "0123456789abcdef".repeat(2500);
+    let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &content);
+    let path = dir.join("big.txt").display().to_string();
+    let wrote = ui.call(Some(MACHINE_ID), "fs.write", json!({"path": path, "content_base64": b64})).await;
+    assert_eq!(wrote["size"], content.len());
+    let read = ui.call(Some(MACHINE_ID), "fs.read", json!({"path": path})).await;
+    assert_eq!(read["content_base64"], b64);
+    let ran = ui.call(Some(MACHINE_ID), "exec", json!({"argv": ["wc", "-c", "big.txt"], "cwd": dir.display().to_string()})).await;
+    assert_eq!(ran["exit_code"], 0);
+    assert!(ran["stdout"].as_str().unwrap().contains(&content.len().to_string()), "{ran}");
+
     // Revoked: the machine goes offline and stops retrying.
     ui.call(None, "machines.revoke", json!({"machine_id": MACHINE_ID})).await;
     ui.machine_online(false).await;
@@ -191,10 +209,17 @@ async fn linked_machine_runs_a_turn(transport: &str) {
 
 #[tokio::test]
 async fn websocket_link() {
-    linked_machine_runs_a_turn("ws").await;
+    linked_machine_runs_a_turn("ws", None).await;
 }
 
 #[tokio::test]
 async fn http_link() {
-    linked_machine_runs_a_turn("http").await;
+    linked_machine_runs_a_turn("http", None).await;
+}
+
+/// Behind a WAF that refuses bodies over 6 KiB: hello, events and the file
+/// all still arrive.
+#[tokio::test]
+async fn http_link_with_small_body_limit() {
+    linked_machine_runs_a_turn("http", Some(6 * 1024)).await;
 }

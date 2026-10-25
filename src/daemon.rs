@@ -50,6 +50,7 @@ pub struct DaemonOptions {
 }
 
 pub async fn run(cfg: Config, opts: DaemonOptions) -> Result<()> {
+    STARTED_AT.get_or_init(crate::protocol::now_ms);
     let explicit_port = opts.port.is_some();
     let port = opts.port.unwrap_or(cfg.port);
     std::fs::create_dir_all(config::home())?;
@@ -281,8 +282,13 @@ async fn local_conn(d: Arc<Daemon>, socket: WebSocket) {
     let _ = writer.await;
 }
 
+/// When this process started serving, for `MachineInfo::started_at`.
+static STARTED_AT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
 pub async fn machine_info(cfg: &Config) -> MachineInfo {
     MachineInfo {
+        home: dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_default(),
+        started_at: *STARTED_AT.get_or_init(crate::protocol::now_ms),
         machine_id: cfg.machine_id.clone(),
         hostname: cfg.machine_name.clone().unwrap_or_else(config::hostname),
         os: std::env::consts::OS.into(),
@@ -390,6 +396,7 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
             serde_json::to_value(mgr.history(&sid()?, after, limit)?)?
         }
         "gc.run" if local => mgr.gc(params["idle"].as_bool().unwrap_or(false)).await,
+        "fs.read" | "fs.write" | "exec" => crate::machine::dispatch(&mgr.cfg(), origin, method, params).await?,
         other => return Err(anyhow!("unknown method `{other}`")),
     })
 }
