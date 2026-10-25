@@ -142,7 +142,11 @@ enum Cmd {
     /// Stop the background daemon
     Stop,
     /// Show daemon and hub link status
-    Status,
+    Status {
+        /// Print it as JSON, for apps that manage agl (works without a daemon)
+        #[arg(long)]
+        json: bool,
+    },
     /// Link this machine to a hub (web app); several hubs can be linked
     Connect {
         /// Hub URL, e.g. https://hub.example.com
@@ -249,7 +253,7 @@ async fn real_main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Status => status(&cfg).await,
+        Cmd::Status { json } => status(&cfg, json).await,
         Cmd::Agents { json, check_updates } => {
             let list = agents::detect(&cfg, check_updates).await;
             if json {
@@ -539,7 +543,28 @@ async fn real_main() -> Result<()> {
     }
 }
 
-async fn status(cfg: &Config) -> Result<()> {
+async fn status(cfg: &Config, as_json: bool) -> Result<()> {
+    if as_json {
+        let daemon = match Client::connect_local().await {
+            Ok(c) => c.call("daemon.status", json!({})).await.ok(),
+            Err(_) => None,
+        };
+        let hubs = match &daemon {
+            Some(s) => s["hubs"].clone(),
+            None => cfg.hubs.iter().map(|h| json!({"url": h.url, "status": "stopped", "access": h.access, "share_local": h.share_local, "transport": h.transport})).collect(),
+        };
+        let out = json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "running": daemon.is_some(),
+            "daemon_version": daemon.as_ref().map(|s| s["version"].clone()),
+            "pid": daemon.as_ref().map(|s| s["pid"].clone()),
+            "machine_id": cfg.machine_id,
+            "service": service::is_installed(),
+            "hubs": hubs,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
     let Ok(c) = Client::connect_local().await else {
         println!("daemon:   not running (start with `agl start`)");
         for h in &cfg.hubs {

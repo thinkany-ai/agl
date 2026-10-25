@@ -65,7 +65,7 @@ agl configure proj -m opus --access edit     # change model or access, keep the 
 agl approve proj <request_id> allow          # answer an approval from another terminal
 agl sessions | history proj | attach         # list / transcript / follow all sessions live
 agl abort proj | close proj | gc --idle
-agl status | start | stop
+agl status [--json] | start | stop
 ```
 
 ## Integrating agl into your product

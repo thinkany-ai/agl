@@ -142,5 +142,24 @@ closed.
 3. Prefix session names with your app id so they don't collide with terminal
    sessions.
 
+When the app also links the machine to your web product (the same link the
+`curl … | sh` install makes, see [web-product.md](web-product.md)), let both
+paths share one install so the machine shows up once:
+
+- Copy the bundled binary to `~/.agl/bin/agl`, where the install script puts
+  it, unless a newer one is already there (`agl --version`), and run
+  `agl service install` from that path. The service then outlives app updates
+  and keeps running when the app is closed or removed.
+- Read `agl status --json` (works without a daemon): `machine_id`, whether the
+  daemon runs and the service is installed, and each linked hub with its
+  status. Your backend learns the same `machine_id` when the machine pairs, so
+  the app can find "this computer" among the ones the backend lists.
+- Link with `agl connect <hub url> --code <code>`, minting the code with the
+  signed-in user's session. A hub URL is one link: when one product has several
+  tenants (workspaces) that each pair the machine, give each tenant its own
+  hub URL, e.g. `https://app.example.com/agl/w/<workspace>`.
+- Apps that run code outside a sandbox can do this; a Mac App Store app
+  cannot, since every process it starts inherits its sandbox.
+
 Sessions are then visible in `agl sessions`, `agl attach` and on the hub. The
 process budget (`max_live`) is shared across every client.
