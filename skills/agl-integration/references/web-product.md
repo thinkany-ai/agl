@@ -33,6 +33,8 @@ two endpoints into your stack.
    - refuses root, and accepts only HTTPS (except localhost);
    - downloads `<base>/download/<os>-<arch>` and verifies it against
      `<base>/download/<os>-<arch>.sha256`;
+   - keeps an agl already installed when it is newer than the download, since
+     other web apps on the machine share it (`AGL_FORCE=1` replaces it anyway);
    - installs autostart (launchd, or systemd --user plus linger);
    - runs `agl connect <base> --code <code>`.
 5. The machine connects to `/ws/machine?code=<code>&machine_id=<uuid>`.

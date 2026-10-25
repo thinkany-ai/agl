@@ -66,6 +66,7 @@ agl approve proj <request_id> allow          # answer an approval from another t
 agl sessions | history proj | attach         # list / transcript / follow all sessions live
 agl abort proj | close proj | gc --idle
 agl status [--json] | start | stop
+agl update [--check] [--if-idle] [--to <version>]   # newest release, verified, daemon restarted on it
 ```
 
 ## Integrating agl into your product

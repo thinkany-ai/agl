@@ -1,4 +1,4 @@
-use agl::{agents, client, config, daemon, hub, link, protocol, service};
+use agl::{agents, client, config, daemon, hub, link, protocol, service, update};
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
@@ -175,6 +175,21 @@ enum Cmd {
         url: Option<String>,
         #[arg(long)]
         all: bool,
+    },
+    /// Update agl to the newest release and restart the daemon on it
+    Update {
+        /// Only say whether a newer release exists
+        #[arg(long)]
+        check: bool,
+        /// Print the result as JSON
+        #[arg(long)]
+        json: bool,
+        /// Leave it for later while a session runs a turn (for unattended updates)
+        #[arg(long)]
+        if_idle: bool,
+        /// Install this version instead of the newest (also to go back)
+        #[arg(long)]
+        to: Option<String>,
     },
     /// Manage autostart (launchd on macOS, systemd --user on Linux)
     Service {
@@ -517,6 +532,39 @@ async fn real_main() -> Result<()> {
             println!("disconnected ({} hub{} left)", cfg.hubs.len(), if cfg.hubs.len() == 1 { "" } else { "s" });
             Ok(())
         }
+        Cmd::Update { check, json, if_idle, to } => {
+            let mut c = update::check().await?;
+            if let Some(v) = to {
+                c.update_available = v.trim_start_matches('v') != c.current;
+                c.latest = v.trim_start_matches('v').to_string();
+            }
+            let mut out = json!({"current": c.current, "latest": c.latest, "update_available": c.update_available, "updated": false});
+            if !check && c.update_available {
+                let busy = match Client::connect_local().await {
+                    Ok(client) => client.call("daemon.status", json!({})).await.ok().and_then(|s| s["busy"].as_u64()).unwrap_or(0),
+                    Err(_) => 0,
+                };
+                if if_idle && busy > 0 {
+                    out["busy"] = json!(busy);
+                } else {
+                    update::install(&c.latest).await?;
+                    update::restart_daemon().await?;
+                    out["updated"] = json!(true);
+                }
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else if out["updated"] == true {
+                println!("updated agl {} → {}", c.current, c.latest);
+            } else if !c.update_available {
+                println!("agl {} is the newest release", c.current);
+            } else if out.get("busy").is_some() {
+                println!("agl {} is available; not updating while {} session(s) run a turn", c.latest, out["busy"]);
+            } else {
+                println!("agl {} is available (current {}); run `agl update`", c.latest, c.current);
+            }
+            Ok(())
+        }
         Cmd::Service { action } => match action {
             ServiceAction::Install => {
                 // A daemon the service manager does not own would hold the port
@@ -558,6 +606,7 @@ async fn status(cfg: &Config, as_json: bool) -> Result<()> {
             "running": daemon.is_some(),
             "daemon_version": daemon.as_ref().map(|s| s["version"].clone()),
             "pid": daemon.as_ref().map(|s| s["pid"].clone()),
+            "busy": daemon.as_ref().map(|s| s["busy"].clone()),
             "machine_id": cfg.machine_id,
             "service": service::is_installed(),
             "hubs": hubs,

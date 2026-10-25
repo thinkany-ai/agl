@@ -334,12 +334,39 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
                 "machine_id": cfg.machine_id,
                 "hubs": hubs,
                 "sessions": mgr.list().iter().filter(|m| origin.sees(&m.origin)).count(),
+                // Sessions with a turn running, starting, waiting or queued.
+                "busy": mgr.list().iter().filter(|m| !crate::session::is_idle(m)).count(),
                 "live": mgr.live_count(),
                 "default_access": cfg.default_access,
                 "idle_timeout_secs": cfg.idle_timeout_secs,
                 "session_ttl_secs": cfg.session_ttl_secs,
                 "max_live": cfg.max_live,
             })
+        }
+        "daemon.update" => {
+            // Replaces the binary and restarts: as much trust as `exec`.
+            crate::machine::allowed(&mgr.cfg(), origin, "daemon.update")?;
+            let check = crate::update::check().await?;
+            // A restart stops every session's turn, but a hub decides only for
+            // its own: a turn running elsewhere (another hub, or a local
+            // client) always defers the update, `if_idle` or not.
+            let (own, elsewhere) = crate::session::busy_counts(&mgr.list(), origin);
+            if !check.update_available {
+                json!({"updated": false, "current": check.current, "latest": check.latest})
+            } else if elsewhere > 0 || (own > 0 && params["if_idle"].as_bool().unwrap_or(false)) {
+                // `busy` counts both, as it did before `busy_elsewhere`.
+                json!({"updated": false, "current": check.current, "latest": check.latest, "busy": own + elsewhere, "busy_elsewhere": elsewhere})
+            } else {
+                crate::update::install(&check.latest).await?;
+                crate::update::relaunch_after_exit()?;
+                // Exit once the answer has gone out; the new binary takes over.
+                let d = d.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    d.shutdown.notify_one();
+                });
+                json!({"updated": true, "current": check.current, "latest": check.latest})
+            }
         }
         "daemon.shutdown" if local => {
             d.shutdown.notify_one();

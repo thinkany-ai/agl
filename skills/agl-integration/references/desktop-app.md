@@ -158,6 +158,11 @@ paths share one install so the machine shows up once:
   signed-in user's session. A hub URL is one link: when one product has several
   tenants (workspaces) that each pair the machine, give each tenant its own
   hub URL, e.g. `https://app.example.com/agl/w/<workspace>`.
+- agl updates on its own release cycle, not only with the app:
+  `agl update --check --json` says whether a newer release exists, and
+  `agl update --if-idle --json` installs it unless a session is running a
+  turn (`busy`), so an app can update it unattended. An app never puts back an
+  older bundled binary over a newer one.
 - Apps that run code outside a sandbox can do this; a Mac App Store app
   cannot, since every process it starts inherits its sandbox.
 

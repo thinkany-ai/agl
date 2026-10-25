@@ -27,7 +27,7 @@ const EXEC_OUTPUT_MAX: usize = 16 * 1024 * 1024;
 
 /// What a hub may do, by its link's access: any link may read, `edit` and
 /// `full` may also write, and only `full` may run a command.
-fn allowed(cfg: &Config, origin: &Origin, method: &str) -> Result<()> {
+pub(crate) fn allowed(cfg: &Config, origin: &Origin, method: &str) -> Result<()> {
     let Origin::Hub { url, .. } = origin else { return Ok(()) };
     let access = cfg.hub(url).map(|h| h.access.as_str()).unwrap_or("ask");
     let ok = match method {

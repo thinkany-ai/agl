@@ -576,8 +576,16 @@ fn age_out_images(history: &mut VecDeque<EventEnvelope>, keep: usize) {
     }
 }
 
-fn is_idle(m: &SessionMeta) -> bool {
+/// No turn running, starting, waiting on an approval, or queued.
+pub fn is_idle(m: &SessionMeta) -> bool {
     !matches!(m.status.as_str(), "running" | "starting" | "waiting") && m.queued == 0
+}
+
+/// Sessions with a turn running or queued: `(own, elsewhere)` for `origin`. A
+/// hub owns the sessions it created; a local client owns them all.
+pub fn busy_counts(sessions: &[SessionMeta], origin: &Origin) -> (usize, usize) {
+    let mine = |m: &SessionMeta| *origin == Origin::Local || m.origin == origin.tag();
+    sessions.iter().filter(|m| !is_idle(m)).fold((0, 0), |(own, elsewhere), m| if mine(m) { (own + 1, elsewhere) } else { (own, elsewhere + 1) })
 }
 
 fn expand_home(p: PathBuf) -> PathBuf {
@@ -1072,6 +1080,27 @@ mod tests {
             ts: 0,
             event: AgentEvent::ToolEnd { call_id: "c".into(), ok: true, output: String::new(), images },
         }
+    }
+
+    fn meta(origin: &str, status: &str) -> SessionMeta {
+        serde_json::from_value(json!({
+            "id": "s", "agent": "claude", "cwd": "/tmp", "status": status,
+            "created_at": 0, "last_active_at": 0, "origin": origin,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_hub_owns_only_the_sessions_it_created() {
+        let sessions = [
+            meta("https://a.example", "running"),
+            meta("https://a.example", "idle"),
+            meta("https://b.example", "running"),
+            meta("local", "waiting"),
+        ];
+        let a = Origin::Hub { url: "https://a.example".into(), share_local: true };
+        assert_eq!(busy_counts(&sessions, &a), (1, 2));
+        assert_eq!(busy_counts(&sessions, &Origin::Local), (3, 0));
     }
 
     #[test]

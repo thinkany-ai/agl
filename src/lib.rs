@@ -17,3 +17,4 @@ pub mod proxy;
 pub mod service;
 pub mod session;
 pub mod shellenv;
+pub mod update;
