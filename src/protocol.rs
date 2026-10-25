@@ -182,7 +182,7 @@ pub struct AgentInfo {
     #[serde(default)]
     pub features: Vec<String>,
     /// ready | desktop-only (only its desktop app is installed) | not-found.
-    /// Empty from agl ≤0.2.
+    /// Empty from agl 0.2.0 and earlier.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub status: String,
     /// The desktop app that ships this agent (macOS).

@@ -104,7 +104,7 @@ A missing agent:
 | `path` | That executable (`AGL_<ID>_BIN` overrides the lookup) |
 | `version` | First line of `--version`, as printed (`codex-cli 0.164.0`, `2.1.310 (Claude Code)`). Absent if the CLI does not answer within 8s. |
 | `features` | What agl can do with it: `warm`, `approvals`, `steer`, `interrupt`, `models`, `effort`, `resume`. Base your UI on these. |
-| `status` | `ready`, `desktop-only` (no CLI, but its macOS desktop app is installed, so suggest installing the CLI), or `not-found`. Absent from agl ≤0.2; derive it from `available` there. |
+| `status` | `ready`, `desktop-only` (no CLI, but its macOS desktop app is installed, so suggest installing the CLI), or `not-found`. Absent from agl 0.2.0 and earlier; derive it from `available` there. |
 | `desktop_app` | The desktop app that ships the agent, e.g. `/Applications/Cursor.app` |
 | `install.source` | How the found binary was installed. `npm` comes with `package` and `prefix` (the global prefix it lives in, which may not be npm's default). The others are `bun`, `brew`, `native` (a standalone install that updates itself), `app-bundle` (the Codex inside Codex.app or ChatGPT.app, which updates with the app) and `unknown`. |
 | `install.install_command` | For a missing agent: the official installer or `npm install -g …` |

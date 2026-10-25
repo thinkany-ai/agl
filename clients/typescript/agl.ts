@@ -61,7 +61,7 @@ export interface InstallInfo {
 
 export interface AgentInfo {
   id: string; name: string; protocol: string; available: boolean; path?: string; version?: string; features: string[];
-  /** Empty from agl ≤0.2. */
+  /** Empty from agl 0.2.0 and earlier. */
   status?: "ready" | "desktop-only" | "not-found";
   desktop_app?: string; install?: InstallInfo;
   /** Only with `check_updates`. */
