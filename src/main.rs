@@ -162,6 +162,9 @@ enum Cmd {
         /// Do not let this hub see sessions started locally
         #[arg(long)]
         private: bool,
+        /// How to reach the hub: `ws` (one WebSocket, default) or `http` (long polling)
+        #[arg(long)]
+        transport: Option<String>,
     },
     /// Unlink this machine from a hub (the only one, or the named one)
     Disconnect {
@@ -427,7 +430,7 @@ async fn real_main() -> Result<()> {
             println!("suspended {} · removed {}", r["suspended"].as_array().map_or(0, |a| a.len()), r["removed"].as_array().map_or(0, |a| a.len()));
             Ok(())
         }
-        Cmd::Connect { url, code, token, name, access, private } => {
+        Cmd::Connect { url, code, token, name, access, private, transport } => {
             link::ws_url(&url, "")?;
             if code.is_none() && token.is_none() {
                 bail!("pass --code <pairing code> or --token <token>");
@@ -435,6 +438,11 @@ async fn real_main() -> Result<()> {
             if let Some(a) = &access {
                 if !agl::session::ACCESS_LEVELS.contains(&a.as_str()) {
                     bail!("--access must be one of {}", agl::session::ACCESS_LEVELS.join(", "));
+                }
+            }
+            if let Some(t) = &transport {
+                if !config::TRANSPORTS.contains(&t.as_str()) {
+                    bail!("--transport must be one of {}", config::TRANSPORTS.join(", "));
                 }
             }
             let url = config::normalize_url(&url);
@@ -447,6 +455,9 @@ async fn real_main() -> Result<()> {
             }
             if private {
                 entry.share_local = false;
+            }
+            if let Some(t) = transport {
+                entry.transport = t;
             }
             cfg.hubs.retain(|h| h.url != url);
             cfg.hubs.push(entry.clone());
@@ -540,11 +551,12 @@ async fn status(cfg: &Config) -> Result<()> {
     }
     for h in hubs {
         println!(
-            "hub:      {} · {} · default access {}{}",
+            "hub:      {} · {} · default access {}{}{}",
             h["url"].as_str().unwrap_or(""),
             h["status"].as_str().unwrap_or(""),
             h["access"].as_str().unwrap_or(""),
-            if h["share_local"].as_bool().unwrap_or(true) { "" } else { " · private" }
+            if h["share_local"].as_bool().unwrap_or(true) { "" } else { " · private" },
+            if h["transport"] == "http" { " · http" } else { "" }
         );
     }
     println!("access:   {} by default (full | edit | ask | read_only)", s["default_access"].as_str().unwrap_or(""));

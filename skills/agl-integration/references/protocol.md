@@ -10,6 +10,7 @@ field, `machine_id`, on each request.
 |---|---|---|
 | `ws://127.0.0.1:<port>/ws` | CLI, desktop apps, local runtimes | `?token=` or `Authorization: Bearer`. The token comes from `$AGL_HOME/daemon.json` (`{pid, port, token, version}`, mode 0600). |
 | `<hub>/ws/machine?machine_id=…&code=…\|token=…` | the agl daemon, dialing out | One-time pairing code, then the machine's own token |
+| `POST <hub>/machine/{pair,send,poll}` | the agl daemon, dialing out (`agl connect --transport http`) | The same, over HTTP: see [HTTP link](#http-link) |
 | `<hub>/ws/ui?token=…` (reference hub) | browsers | Hub admin token. In your product, use your own auth. |
 
 Framing:
@@ -26,6 +27,49 @@ Framing:
 version (currently `1`; agl ≤0.1 sends none, read it as `0`). New fields,
 methods and event kinds are additive within a version, so clients must
 ignore what they do not know. Only an incompatible change bumps the version.
+
+## HTTP link
+
+The machine link can also run over plain HTTPS requests, for backends that
+cannot hold one WebSocket per machine (several stateless instances, a WAF, a
+serverless host). The machine chooses it with `agl connect <hub> --transport
+http`; the hub's install command can pass that flag in `__CONNECT_ARGS__`.
+The messages are exactly the WebSocket link's; only how they travel differs.
+
+Every call is a `POST` with a JSON body. After pairing, each carries
+`Authorization: Bearer <machine token>` and `X-Agl-Machine-Id: <machine_id>`.
+
+| call | body | answer |
+|---|---|---|
+| `<hub>/machine/pair` | `{machine_id, code}` | `{token}`: the machine's own token. 401 for an invalid or used code. |
+| `<hub>/machine/send` | `{messages: [...]}` | 2xx. `hello` first after every (re)connect, then `response` and `event` messages in the order they happened. |
+| `<hub>/machine/poll` | `{ack, wait_ms}` | `{messages: [request…], cursor}`. Held open up to `wait_ms` (25 000) until there is a request; empty `messages` on timeout. |
+
+Delivery:
+- **Requests, hub → machine.** Give each queued request a cursor that
+  increases per machine. `poll` returns the oldest unacknowledged ones and
+  `cursor`, the last cursor returned (or `ack` when there are none). The
+  machine sends that back as `ack` on its next poll; drop everything up to
+  it. Anything not yet acknowledged is delivered again, and the machine
+  answers a request id it has already run from a cache instead of running it
+  twice, so redelivering is always safe.
+- **Messages, machine → hub.** Batches of up to 500 messages or 256 KiB; a
+  batch that failed is sent again. Drop a `response` whose `id` you no longer
+  wait for, and an `event` whose `seq` is not above the last one you have for
+  its `session_id`.
+- **Presence.** A machine is online from its `hello` while it keeps polling.
+  It polls again as soon as a poll returns, so mark it offline when no poll
+  has been open for about 60 s.
+- **Errors.** 401 or 403 on any call means the token is revoked: the machine
+  stops retrying and reports `unauthorized … run agl connect again`. 409 on
+  `poll` means you have no `hello` for it (for instance after a restart): the
+  machine reconnects and sends `hello` again. Anything else is retried with
+  backoff up to 30 s.
+
+The state this needs (the request queue with cursors, the last `seq` per
+session, the last poll time) fits in a database or Redis, so any instance
+can answer any call: a request created on one instance can be handed out by
+the poll another instance is holding.
 
 ## Visibility: one machine, several hubs
 

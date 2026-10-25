@@ -14,12 +14,12 @@ pub struct Target {
     pub secure: bool,
 }
 
-/// Host, port and scheme of a ws(s):// URL.
+/// Host, port and scheme of a ws(s):// or http(s):// URL.
 pub fn target(url: &str) -> Result<Target> {
     let (secure, rest) = match url.split_once("://") {
-        Some(("wss", r)) => (true, r),
-        Some(("ws", r)) => (false, r),
-        _ => bail!("not a ws(s) url: {url}"),
+        Some(("wss" | "https", r)) => (true, r),
+        Some(("ws" | "http", r)) => (false, r),
+        _ => bail!("not a ws(s) or http(s) url: {url}"),
     };
     let authority = rest.split(['/', '?']).next().unwrap_or_default();
     let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
@@ -144,6 +144,8 @@ mod tests {
         let t = target("ws://10.0.0.2:8787/ws/machine").unwrap();
         assert_eq!((t.host.as_str(), t.port, t.secure), ("10.0.0.2", 8787, false));
         assert_eq!(target("ws://[::1]:9/x").unwrap().host, "::1");
+        let t = target("https://app.example.com/agl/machine/poll").unwrap();
+        assert_eq!((t.host.as_str(), t.port, t.secure), ("app.example.com", 443, true));
     }
 
     #[test]

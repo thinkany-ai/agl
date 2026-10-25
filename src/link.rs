@@ -1,7 +1,8 @@
 //! Outbound links from this machine to hubs (web apps). The machine dials
-//! out over WebSocket (works behind NAT), introduces itself with `hello`,
-//! then serves the hub's requests with the same dispatcher as the local API
-//! and streams back the events of the sessions that hub may see.
+//! out (works behind NAT), introduces itself with `hello`, then serves the
+//! hub's requests with the same dispatcher as the local API and streams back
+//! the events of the sessions that hub may see. Over one WebSocket here, or
+//! over HTTP long polling (`link_http`); the messages are the same.
 //!
 //! One task per configured hub; tasks are started and stopped as `hubs` in
 //! the config changes (`hub.reload`).
@@ -34,7 +35,7 @@ pub fn ws_url(hub: &str, path: &str) -> Result<String> {
     Ok(format!("{base}{path}"))
 }
 
-fn set_status(d: &Daemon, url: &str, s: impl Into<String>) {
+pub(crate) fn set_status(d: &Daemon, url: &str, s: impl Into<String>) {
     d.hub_status.lock().unwrap().insert(url.to_string(), s.into());
 }
 
@@ -68,6 +69,8 @@ pub async fn supervise(d: Arc<Daemon>) {
 /// Connect to one hub, reconnecting with backoff until the link is removed.
 async fn run_link(d: Arc<Daemon>, url: String) {
     let mut backoff = 1u64;
+    // Kept across reconnects: what the HTTP link has received and answered.
+    let mut http_state = crate::link_http::State::default();
     loop {
         let Some(link) = d.mgr.cfg().hub(&url).cloned() else { return };
         let (kind, secret) = match (&link.token, &link.pair_code) {
@@ -79,7 +82,11 @@ async fn run_link(d: Arc<Daemon>, url: String) {
             }
         };
         set_status(&d, &url, "connecting");
-        match connect_once(&d, &link, kind, &secret).await {
+        let attempt = match link.transport.as_str() {
+            "http" => crate::link_http::connect_once(&d, &link, kind, &secret, &mut http_state).await,
+            _ => connect_once(&d, &link, kind, &secret).await,
+        };
+        match attempt {
             // Just paired: `supervise` restarts the link with the new token.
             Ok(()) => return,
             Err(e) if is_unauthorized(&e) => {
@@ -100,10 +107,25 @@ async fn run_link(d: Arc<Daemon>, url: String) {
 }
 
 fn is_unauthorized(e: &anyhow::Error) -> bool {
-    e.chain().any(|c| match c.downcast_ref::<tokio_tungstenite::tungstenite::Error>() {
-        Some(tokio_tungstenite::tungstenite::Error::Http(resp)) => matches!(resp.status().as_u16(), 401 | 403),
-        _ => false,
+    e.chain().any(|c| {
+        c.is::<crate::link_http::Unauthorized>()
+            || matches!(c.downcast_ref::<tokio_tungstenite::tungstenite::Error>(),
+                Some(tokio_tungstenite::tungstenite::Error::Http(resp)) if matches!(resp.status().as_u16(), 401 | 403))
     })
+}
+
+/// Swap the link's pairing code for the token the hub issued. The changed
+/// entry restarts the link through `supervise`.
+pub(crate) fn store_token(d: &Daemon, hub: &str, token: String) -> Result<()> {
+    let mut fresh = Config::load()?;
+    let Some(entry) = fresh.hubs.iter_mut().find(|h| h.url == hub) else { bail!("hub was removed while pairing") };
+    entry.token = Some(token);
+    entry.pair_code = None;
+    fresh.save()?;
+    *d.mgr.cfg.write().unwrap() = fresh;
+    eprintln!("hub link {hub}: paired");
+    d.reload.send_modify(|g| *g += 1);
+    Ok(())
 }
 
 async fn connect_once(d: &Arc<Daemon>, link: &HubLink, kind: &str, secret: &str) -> Result<()> {
@@ -132,16 +154,7 @@ async fn connect_once(d: &Arc<Daemon>, link: &HubLink, kind: &str, secret: &str)
         let first = tokio::time::timeout(Duration::from_secs(15), stream.next()).await.context("pairing timed out")?;
         let Some(Ok(Message::Text(text))) = first else { bail!("hub closed the connection during pairing") };
         let Ok(WireMsg::Paired { token }) = serde_json::from_str::<WireMsg>(&text) else { bail!("unexpected pairing reply") };
-        let mut fresh = Config::load()?;
-        let Some(entry) = fresh.hubs.iter_mut().find(|h| h.url == *hub) else { bail!("hub was removed while pairing") };
-        entry.token = Some(token);
-        entry.pair_code = None;
-        fresh.save()?;
-        *d.mgr.cfg.write().unwrap() = fresh;
-        eprintln!("hub link {hub}: paired");
-        // The changed entry restarts this link through `supervise`.
-        d.reload.send_modify(|g| *g += 1);
-        return Ok(());
+        return store_token(d, hub, token);
     }
     sink.send(Message::Text(WireMsg::Hello { machine: machine_info(&cfg).await }.to_json().into())).await?;
     set_status(d, hub, "connected");

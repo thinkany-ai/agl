@@ -317,7 +317,7 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
                 .iter()
                 // A hub learns nothing about the machine's other hubs.
                 .filter(|h| local || Origin::Hub { url: h.url.clone(), share_local: false }.tag() == origin.tag())
-                .map(|h| json!({"url": h.url, "status": statuses.get(&h.url).cloned().unwrap_or_else(|| "starting".into()), "access": h.access, "share_local": h.share_local}))
+                .map(|h| json!({"url": h.url, "status": statuses.get(&h.url).cloned().unwrap_or_else(|| "starting".into()), "access": h.access, "share_local": h.share_local, "transport": h.transport}))
                 .collect();
             json!({
                 "version": VERSION,

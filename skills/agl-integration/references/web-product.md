@@ -66,8 +66,13 @@ After `hello`, your backend:
   `agl connect --private`. Sessions created by other web apps the same
   machine is linked to are never visible to you.
 
+Over HTTP (`agl connect --transport http`), the same messages travel as
+`POST /machine/send` and long-polled `POST /machine/poll` calls; see
+[HTTP link](protocol.md#http-link) for the delivery rules.
+
 What the daemon does on its side:
-- sends a WebSocket ping every 20s, and reconnects if it hears nothing for 60s;
+- sends a WebSocket ping every 20s, and reconnects if it hears nothing for 60s
+  (over HTTP: polls continuously; a poll is held at most 25s);
 - reconnects with exponential backoff up to 30s;
 - on HTTP 401 or 403 at upgrade, stops retrying and reports
   `unauthorized … run agl connect again`. That is how revocation works:
@@ -94,7 +99,13 @@ See [protocol.md](protocol.md) for parameters and events.
 
 ## 4. Multi-instance backends
 
-A machine socket is held by **one** backend instance. With several pods:
+Simplest: link machines over HTTP (`--transport http` in the install
+command's connect arguments). Every call is an ordinary request that any
+instance can answer, with the request queue and cursors in your database
+([HTTP link](protocol.md#http-link)).
+
+Over WebSocket, a machine socket is held by **one** backend instance. With
+several pods:
 - **Sticky gateway**: a small stateful service holds the machine sockets, for
   example one Durable Object per machine on Cloudflare, or a dedicated
   WS-gateway deployment. API pods publish requests to it through

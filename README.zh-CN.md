@@ -30,6 +30,7 @@
 | **稳定性** | 有心跳和卡死检测；中断 10s 后仍未结束就强制结束；API key 冲突时自动改用 CLI 的登录账号；从登录 shell 导入 PATH 和 key |
 | **远程接入** | 一次性配对码、每台机器独立 token、可吊销；安装脚本只允许 HTTPS、校验 sha256，并注册 launchd / systemd 开机自启 |
 | **代理与内网** | 机器主动外连；Hub 连接支持 `HTTPS_PROXY` / `NO_PROXY`（launchd / systemd 启动时同样生效） |
+| **适配各种后端** | Hub 连接可以走一条 WebSocket，也可以走普通 HTTP 长轮询（`--transport http`），适合多实例无状态部署、有 WAF 或 Serverless 托管的后端 |
 | **一台机器连多个 web app** | 可以同时连多个 hub，每个 hub 只能看到自己创建的会话，以及本地会话（`--private` 时看不到）；远程创建的会话默认 `ask` |
 | **接入方式** | 本地 WebSocket，零依赖 TypeScript 客户端，Rust crate，给编码 Agent 用的接入 skill |
 

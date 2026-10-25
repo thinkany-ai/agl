@@ -90,6 +90,16 @@ pub struct HubLink {
     /// Let this hub see and drive sessions started locally (CLI, apps).
     #[serde(default = "default_true")]
     pub share_local: bool,
+    /// `ws` (one WebSocket) or `http` (long polling, for backends that cannot
+    /// hold a socket per machine).
+    #[serde(default = "default_transport")]
+    pub transport: String,
+}
+
+pub const TRANSPORTS: [&str; 2] = ["ws", "http"];
+
+fn default_transport() -> String {
+    "ws".into()
 }
 
 fn default_remote_access() -> String {
@@ -102,7 +112,7 @@ fn default_true() -> bool {
 
 impl HubLink {
     pub fn new(url: &str) -> HubLink {
-        HubLink { url: normalize_url(url), token: None, pair_code: None, access: default_remote_access(), share_local: true }
+        HubLink { url: normalize_url(url), token: None, pair_code: None, access: default_remote_access(), share_local: true, transport: default_transport() }
     }
 }
 

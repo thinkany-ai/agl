@@ -4,6 +4,7 @@
 //! - `GET /install.sh?code=…`         installer for a one-time pairing code
 //! - `GET /download/<os>-<arch>`      agl binary (`.sha256` for its checksum)
 //! - `WS  /ws/machine?code=…|token=…` machines dial in here
+//! - `POST /machine/{pair,send,poll}` the same, over HTTP long polling
 //! - `WS  /ws/ui?token=…`             browsers: `request` with `machine_id`
 //!
 //! Pairing: the UI asks for a one-time code (10 min); the install command
@@ -11,9 +12,10 @@
 //! (`paired`), and reconnects with that. Only token hashes are stored, and a
 //! machine can be revoked on its own. The admin token guards the UI.
 //!
-//! A real web app implements the same two WebSocket contracts.
+//! A real web app implements the same contracts: the machine link over
+//! WebSocket or HTTP (or both), and whatever its own browsers need.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,25 +26,47 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
-use axum::Router;
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
+use tokio::time::Instant;
 
 use crate::config;
-use crate::protocol::{now_ms, WireMsg};
+use crate::protocol::{now_ms, MachineInfo, WireMsg};
 
 const UI_HTML: &str = include_str!("../assets/hub.html");
 const INSTALL_SH: &str = include_str!("../assets/install.sh");
 const PAIRING_TTL_MS: u64 = 10 * 60 * 1000;
+/// Longest a poll is held open.
+const POLL_WAIT_MAX: Duration = Duration::from_millis(crate::link_http::POLL_WAIT_MS);
+/// An HTTP machine that has not polled for this long is offline.
+const HTTP_OFFLINE_AFTER: Duration = Duration::from_secs(60);
+/// Requests handed out per poll.
+const POLL_BATCH: usize = 100;
 
 struct MachineConn {
     conn: u64,
     info: Value,
     tx: mpsc::UnboundedSender<String>,
+}
+
+/// What an HTTP-linked machine has yet to collect.
+struct Outbox {
+    conn: u64,
+    hostname: String,
+    /// Requests by cursor; kept until a poll acknowledges them.
+    queue: VecDeque<(u64, String)>,
+    next: u64,
+    notify: Arc<Notify>,
+    /// Last poll or send; a poll in flight counts as now.
+    seen: Instant,
+    polls: usize,
+    /// Highest event `seq` relayed per session: a resent batch is dropped.
+    seqs: HashMap<String, u64>,
 }
 
 struct Pending {
@@ -77,6 +101,8 @@ struct Hub {
     /// pairing code -> expiry (unix ms)
     codes: Mutex<HashMap<String, u64>>,
     machines: Mutex<HashMap<String, MachineConn>>,
+    /// machine_id -> outbox, for machines linked over HTTP.
+    outboxes: Mutex<HashMap<String, Outbox>>,
     uis: Mutex<HashMap<u64, mpsc::UnboundedSender<String>>>,
     pending: Mutex<HashMap<String, Pending>>,
     counter: AtomicU64,
@@ -121,6 +147,7 @@ pub async fn run(listen: String, public_url: Option<String>, token: Option<Strin
         store: Mutex::new(store),
         codes: Mutex::default(),
         machines: Mutex::default(),
+        outboxes: Mutex::default(),
         uis: Mutex::default(),
         pending: Mutex::default(),
         counter: AtomicU64::new(1),
@@ -130,8 +157,12 @@ pub async fn run(listen: String, public_url: Option<String>, token: Option<Strin
         .route("/install.sh", get(install_script))
         .route("/download/{target}", get(download))
         .route("/ws/machine", get(machine_ws))
+        .route("/machine/pair", post(http_pair))
+        .route("/machine/send", post(http_send))
+        .route("/machine/poll", post(http_poll))
         .route("/ws/ui", get(ui_ws))
         .with_state(hub.clone());
+    tokio::spawn(reap_http_machines(hub.clone()));
     let listener = tokio::net::TcpListener::bind(&listen).await.with_context(|| format!("bind {listen}"))?;
     let shown = hub.public_url.clone().unwrap_or_else(|| {
         let port = listener.local_addr().map(|a| a.port()).unwrap_or(8787);
@@ -215,6 +246,79 @@ impl Hub {
         if let Some(tx) = self.uis.lock().unwrap().get(&ui) {
             let _ = tx.send(msg.to_string());
         }
+    }
+
+    /// A machine's own token, for a pairing code just consumed.
+    fn issue_token(&self, machine_id: &str) -> String {
+        let token = random_token("aglm_");
+        self.store.lock().unwrap().machines.insert(
+            machine_id.to_string(),
+            MachineRecord { token_sha256: sha256_hex(token.as_bytes()), hostname: String::new(), paired_at: now_ms() },
+        );
+        self.save();
+        println!("machine paired: {machine_id}");
+        token
+    }
+
+    /// A machine said `hello`: requests for it now go to `tx`.
+    fn machine_online(&self, machine: &MachineInfo, tx: mpsc::UnboundedSender<String>, transport: &str) -> u64 {
+        let machine_id = machine.machine_id.clone();
+        let conn = self.counter.fetch_add(1, Ordering::SeqCst);
+        let mut info = serde_json::to_value(machine).unwrap_or_default();
+        info["connected_at"] = json!(now_ms());
+        info["transport"] = json!(transport);
+        if let Some(rec) = self.store.lock().unwrap().machines.get_mut(&machine_id) {
+            rec.hostname = machine.hostname.clone();
+        }
+        self.save();
+        self.machines.lock().unwrap().insert(machine_id.clone(), MachineConn { conn, info, tx });
+        self.broadcast_machines();
+        println!("machine connected: {} ({machine_id}, agl {}, protocol {}, {transport})", machine.hostname, machine.version, machine.protocol);
+        conn
+    }
+
+    /// A response, event or repeated `hello` from an online machine.
+    fn relay(&self, machine_id: &str, msg: WireMsg) {
+        match msg {
+            WireMsg::Response { id, result, error } => {
+                if let Some(p) = self.pending.lock().unwrap().remove(&id) {
+                    self.send_ui(p.ui, json!({"type": "response", "id": p.id, "machine_id": p.machine_id, "result": result, "error": error}));
+                }
+            }
+            WireMsg::Event(env) => {
+                let mut v = serde_json::to_value(&env).unwrap_or_default();
+                v["type"] = json!("event");
+                v["machine_id"] = json!(machine_id);
+                self.broadcast(&v);
+            }
+            WireMsg::Hello { machine } => {
+                if let Some(m) = self.machines.lock().unwrap().get_mut(machine_id) {
+                    m.info["agents"] = serde_json::to_value(&machine.agents).unwrap_or_default();
+                }
+                self.broadcast_machines();
+            }
+            _ => {}
+        }
+    }
+
+    /// The connection `conn` of a machine ended; fail what it still owed.
+    fn machine_gone(&self, machine_id: &str, conn: u64, hostname: &str) {
+        {
+            let mut machines = self.machines.lock().unwrap();
+            if machines.get(machine_id).map(|m| m.conn) == Some(conn) {
+                machines.remove(machine_id);
+            }
+        }
+        let failed: Vec<Pending> = {
+            let mut pending = self.pending.lock().unwrap();
+            let ids: Vec<String> = pending.iter().filter(|(_, p)| p.machine_id == machine_id).map(|(k, _)| k.clone()).collect();
+            ids.into_iter().filter_map(|k| pending.remove(&k)).collect()
+        };
+        for p in failed {
+            self.send_ui(p.ui, json!({"type": "response", "id": p.id, "machine_id": p.machine_id, "error": "machine disconnected"}));
+        }
+        self.broadcast_machines();
+        println!("machine disconnected: {hostname} ({machine_id})");
     }
 }
 
@@ -303,15 +407,9 @@ async fn machine_ws(State(hub): State<Arc<Hub>>, Query(q): Query<AuthQuery>, ws:
 
 /// Issue the machine its own token; it reconnects with it.
 async fn pair(hub: Arc<Hub>, mut socket: WebSocket, machine_id: String) {
-    let token = random_token("aglm_");
-    hub.store.lock().unwrap().machines.insert(
-        machine_id.clone(),
-        MachineRecord { token_sha256: sha256_hex(token.as_bytes()), hostname: String::new(), paired_at: now_ms() },
-    );
-    hub.save();
+    let token = hub.issue_token(&machine_id);
     let _ = socket.send(Message::Text(WireMsg::Paired { token }.to_json().into())).await;
     let _ = socket.close().await;
-    println!("machine paired: {machine_id}");
 }
 
 async fn machine_conn(hub: Arc<Hub>, socket: WebSocket) {
@@ -320,18 +418,8 @@ async fn machine_conn(hub: Arc<Hub>, socket: WebSocket) {
     let Ok(Some(Ok(Message::Text(text)))) = hello else { return };
     let Ok(WireMsg::Hello { machine }) = serde_json::from_str::<WireMsg>(&text) else { return };
     let machine_id = machine.machine_id.clone();
-    let conn = hub.counter.fetch_add(1, Ordering::SeqCst);
-    let mut info = serde_json::to_value(&machine).unwrap_or_default();
-    info["connected_at"] = json!(now_ms());
-    if let Some(rec) = hub.store.lock().unwrap().machines.get_mut(&machine_id) {
-        rec.hostname = machine.hostname.clone();
-    }
-    hub.save();
-
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    hub.machines.lock().unwrap().insert(machine_id.clone(), MachineConn { conn, info, tx });
-    hub.broadcast_machines();
-    println!("machine connected: {} ({machine_id}, agl {}, protocol {})", machine.hostname, machine.version, machine.protocol);
+    let conn = hub.machine_online(&machine, tx, "ws");
 
     let writer = tokio::spawn(async move {
         let mut ping = tokio::time::interval(Duration::from_secs(25));
@@ -349,45 +437,202 @@ async fn machine_conn(hub: Arc<Hub>, socket: WebSocket) {
 
     while let Some(Ok(msg)) = stream.next().await {
         let Message::Text(text) = msg else { continue };
-        match serde_json::from_str::<WireMsg>(&text) {
-            Ok(WireMsg::Response { id, result, error }) => {
-                if let Some(p) = hub.pending.lock().unwrap().remove(&id) {
-                    hub.send_ui(p.ui, json!({"type": "response", "id": p.id, "machine_id": p.machine_id, "result": result, "error": error}));
-                }
-            }
-            Ok(WireMsg::Event(env)) => {
-                let mut v = serde_json::to_value(&env).unwrap_or_default();
-                v["type"] = json!("event");
-                v["machine_id"] = json!(machine_id);
-                hub.broadcast(&v);
-            }
-            Ok(WireMsg::Hello { machine }) => {
-                if let Some(m) = hub.machines.lock().unwrap().get_mut(&machine_id) {
-                    m.info["agents"] = serde_json::to_value(&machine.agents).unwrap_or_default();
-                }
-                hub.broadcast_machines();
-            }
-            _ => {}
+        if let Ok(msg) = serde_json::from_str::<WireMsg>(&text) {
+            hub.relay(&machine_id, msg);
         }
     }
 
     writer.abort();
-    {
-        let mut machines = hub.machines.lock().unwrap();
-        if machines.get(&machine_id).map(|m| m.conn) == Some(conn) {
-            machines.remove(&machine_id);
+    hub.machine_gone(&machine_id, conn, &machine.hostname);
+}
+
+// ---- The machine link over HTTP (long polling) ----
+
+#[derive(Deserialize)]
+struct PairBody {
+    machine_id: String,
+    code: String,
+}
+
+/// Swap a one-time code for the machine's own token.
+async fn http_pair(State(hub): State<Arc<Hub>>, Json(b): Json<PairBody>) -> Response {
+    if b.machine_id.is_empty() || b.machine_id.len() > 64 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    if !hub.take_code(&b.code) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(json!({"token": hub.issue_token(&b.machine_id)})).into_response()
+}
+
+/// The machine a send or poll comes from, by its token.
+fn http_machine(hub: &Hub, headers: &HeaderMap) -> Result<String, StatusCode> {
+    let machine_id = headers.get("x-agl-machine-id").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+    if machine_id.is_empty() || machine_id.len() > 64 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let token = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).unwrap_or_default();
+    if !(hub.machine_token_ok(&machine_id, token) || token == hub.token) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(machine_id)
+}
+
+#[derive(Deserialize)]
+struct SendBody {
+    #[serde(default)]
+    messages: Vec<Value>,
+}
+
+/// `hello`, responses and events, in the order the machine produced them.
+async fn http_send(State(hub): State<Arc<Hub>>, headers: HeaderMap, Json(b): Json<SendBody>) -> Response {
+    let machine_id = match http_machine(&hub, &headers) {
+        Ok(m) => m,
+        Err(status) => return status.into_response(),
+    };
+    for m in b.messages {
+        let Ok(msg) = serde_json::from_value::<WireMsg>(m) else { continue };
+        match msg {
+            WireMsg::Hello { mut machine } => {
+                // A machine speaks only for itself.
+                machine.machine_id = machine_id.clone();
+                http_hello(&hub, machine);
+            }
+            WireMsg::Event(env) => {
+                let fresh = {
+                    let mut boxes = hub.outboxes.lock().unwrap();
+                    let Some(o) = boxes.get_mut(&machine_id) else { continue };
+                    let last = o.seqs.entry(env.session_id.clone()).or_insert(0);
+                    let fresh = env.seq > *last;
+                    *last = (*last).max(env.seq);
+                    fresh
+                };
+                if fresh {
+                    hub.relay(&machine_id, WireMsg::Event(env));
+                }
+            }
+            other => hub.relay(&machine_id, other),
         }
     }
-    let failed: Vec<Pending> = {
-        let mut pending = hub.pending.lock().unwrap();
-        let ids: Vec<String> = pending.iter().filter(|(_, p)| p.machine_id == machine_id).map(|(k, _)| k.clone()).collect();
-        ids.into_iter().filter_map(|k| pending.remove(&k)).collect()
-    };
-    for p in failed {
-        hub.send_ui(p.ui, json!({"type": "response", "id": p.id, "machine_id": p.machine_id, "error": "machine disconnected"}));
+    if let Some(o) = hub.outboxes.lock().unwrap().get_mut(&machine_id) {
+        o.seen = Instant::now();
     }
-    hub.broadcast_machines();
-    println!("machine disconnected: {} ({machine_id})", machine.hostname);
+    StatusCode::NO_CONTENT.into_response()
+}
+
+fn http_hello(hub: &Arc<Hub>, machine: MachineInfo) {
+    let machine_id = machine.machine_id.clone();
+    if let Some(o) = hub.outboxes.lock().unwrap().get_mut(&machine_id) {
+        // Reconnected: requests not yet acknowledged are delivered again.
+        o.seen = Instant::now();
+        hub.relay(&machine_id, WireMsg::Hello { machine });
+        return;
+    }
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let conn = hub.machine_online(&machine, tx, "http");
+    hub.outboxes.lock().unwrap().insert(
+        machine_id.clone(),
+        Outbox {
+            conn,
+            hostname: machine.hostname.clone(),
+            queue: VecDeque::new(),
+            next: 0,
+            notify: Arc::new(Notify::new()),
+            seen: Instant::now(),
+            polls: 0,
+            seqs: HashMap::new(),
+        },
+    );
+    let hub = hub.clone();
+    tokio::spawn(async move {
+        while let Some(s) = rx.recv().await {
+            let mut boxes = hub.outboxes.lock().unwrap();
+            let Some(o) = boxes.get_mut(&machine_id).filter(|o| o.conn == conn) else { return };
+            if s == "\u{0}close" {
+                // Revoked: wake its poll, which then finds the token gone.
+                let o = boxes.remove(&machine_id).expect("present");
+                o.notify.notify_one();
+                drop(boxes);
+                hub.machine_gone(&machine_id, conn, &o.hostname);
+                return;
+            }
+            o.next += 1;
+            o.queue.push_back((o.next, s));
+            o.notify.notify_one();
+        }
+    });
+}
+
+#[derive(Deserialize)]
+struct PollBody {
+    /// Cursor of the last messages received; they are dropped.
+    ack: Option<u64>,
+    wait_ms: Option<u64>,
+}
+
+/// Counts a poll in flight until it ends, also when the client goes away.
+struct PollGuard(Arc<Hub>, String);
+
+impl Drop for PollGuard {
+    fn drop(&mut self) {
+        if let Some(o) = self.0.outboxes.lock().unwrap().get_mut(&self.1) {
+            o.polls = o.polls.saturating_sub(1);
+            o.seen = Instant::now();
+        }
+    }
+}
+
+/// Hand out pending requests, waiting up to `wait_ms` for one.
+async fn http_poll(State(hub): State<Arc<Hub>>, headers: HeaderMap, Json(b): Json<PollBody>) -> Response {
+    let machine_id = match http_machine(&hub, &headers) {
+        Ok(m) => m,
+        Err(status) => return status.into_response(),
+    };
+    let notify = {
+        let mut boxes = hub.outboxes.lock().unwrap();
+        let Some(o) = boxes.get_mut(&machine_id) else { return (StatusCode::CONFLICT, "send hello first").into_response() };
+        if let Some(ack) = b.ack {
+            while o.queue.front().is_some_and(|(c, _)| *c <= ack) {
+                o.queue.pop_front();
+            }
+        }
+        o.polls += 1;
+        o.seen = Instant::now();
+        o.notify.clone()
+    };
+    let _guard = PollGuard(hub.clone(), machine_id.clone());
+    let deadline = Instant::now() + Duration::from_millis(b.wait_ms.unwrap_or(u64::MAX)).min(POLL_WAIT_MAX);
+    let batch = loop {
+        let ready = hub.outboxes.lock().unwrap().get(&machine_id).map(|o| o.queue.iter().take(POLL_BATCH).cloned().collect::<Vec<_>>());
+        match ready {
+            None if http_machine(&hub, &headers).is_err() => return StatusCode::UNAUTHORIZED.into_response(),
+            None => return (StatusCode::CONFLICT, "machine went offline; send hello again").into_response(),
+            Some(v) if !v.is_empty() => break v,
+            Some(_) => {}
+        }
+        if tokio::time::timeout_at(deadline, notify.notified()).await.is_err() {
+            break Vec::new();
+        }
+    };
+    let cursor = batch.last().map(|(c, _)| *c).or(b.ack);
+    let messages: Vec<Value> = batch.iter().filter_map(|(_, s)| serde_json::from_str(s).ok()).collect();
+    Json(json!({"messages": messages, "cursor": cursor})).into_response()
+}
+
+/// Take HTTP machines that stopped polling offline.
+async fn reap_http_machines(hub: Arc<Hub>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        tick.tick().await;
+        let gone: Vec<(String, Outbox)> = {
+            let mut boxes = hub.outboxes.lock().unwrap();
+            let ids: Vec<String> = boxes.iter().filter(|(_, o)| o.polls == 0 && o.seen.elapsed() > HTTP_OFFLINE_AFTER).map(|(k, _)| k.clone()).collect();
+            ids.into_iter().filter_map(|k| boxes.remove(&k).map(|o| (k, o))).collect()
+        };
+        for (machine_id, o) in gone {
+            hub.machine_gone(&machine_id, o.conn, &o.hostname);
+        }
+    }
 }
 
 async fn ui_ws(State(hub): State<Arc<Hub>>, Query(q): Query<AuthQuery>, ws: WebSocketUpgrade) -> Response {

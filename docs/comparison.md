@@ -111,7 +111,6 @@ codex  agl warm  first_text_ms [3731, 2823, 2993, 2536] / [2939, 2104, 2008, 204
 - **ACP 客户端能力**：还没实现 `terminal/*` 和 `fs/*`。目前声明为不支持，由 Agent 自己执行命令。
 - **多 session 共享进程**：codex app-server 本身支持一个进程跑多个 thread，但 agl 仍然是一个会话一个进程（oar 也没有验证过前者）。
 - **输入身份**：可以用 claude 的 `uuid` 加 `--replay-user-messages`、codex 的 `clientUserMessageId` 做到逐条输入的确认。目前只做了 `turn_id` 级别。
-- **长轮询链路**：Hub 链路只有 WebSocket。多 pod 的后端需要一个有状态的网关（见 skill 的 web-product.md），Fleet 那种 HTTP 长轮询方式还没提供。
 - **Agent 登录**：agl 不负责 CLI 的登录流程（oar 有 `login()`），用户需要先在机器上登录好各个 CLI。无头服务器上可以靠 API key 环境变量解决。
 
 0.2 已补上的：

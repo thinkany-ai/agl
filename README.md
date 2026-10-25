@@ -30,6 +30,7 @@ The design draws on [botiverse/oar](https://github.com/botiverse/oar) and on the
 | **Reliability** | Heartbeats and stall detection. A turn that hasn't stopped 10s after an interrupt is killed. Claude falls back to its own login when an exported API key is rejected. PATH and API keys are imported from the login shell. |
 | **Remote linking** | One-time pairing codes and a per-machine token that can be revoked. The installer is HTTPS-only, verifies a sha256 checksum, and sets up launchd/systemd autostart. |
 | **Behind proxies and NAT** | The machine dials out; the hub link honours `HTTPS_PROXY` / `NO_PROXY` (also when started by launchd/systemd). |
+| **Any backend** | The hub link runs over one WebSocket, or over plain HTTP long polling (`--transport http`) for backends with several stateless instances, a WAF or a serverless host. |
 | **Several web apps per machine** | A machine can link to several hubs. Each one sees only the sessions it created, plus local ones unless linked `--private`. Remote sessions default to `ask`. |
 | **Integration options** | A local WebSocket API, a zero-dependency TypeScript client, a Rust crate, and an integration skill for coding agents. |
 
