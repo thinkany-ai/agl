@@ -518,8 +518,8 @@ impl Manager {
             let mut h = shared.history.lock().unwrap();
             // Merge consecutive text deltas so history stays compact.
             let merged = match (h.back_mut(), &env.event) {
-                (Some(last), AgentEvent::TextDelta { text }) => match &mut last.event {
-                    AgentEvent::TextDelta { text: prev } => {
+                (Some(last), AgentEvent::TextDelta { text, phase }) => match &mut last.event {
+                    AgentEvent::TextDelta { text: prev, phase: prev_phase } if prev_phase == phase => {
                         prev.push_str(text);
                         last.seq = env.seq;
                         last.ts = env.ts;
@@ -760,7 +760,7 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                     DriverMsg::Event(e) => {
                         if let Some(r) = current.as_mut() {
                             match &e {
-                                AgentEvent::TextDelta { text } => {
+                                AgentEvent::TextDelta { text, .. } => {
                                     r.activity = true;
                                     r.retrying = false;
                                     if !text.is_empty() {

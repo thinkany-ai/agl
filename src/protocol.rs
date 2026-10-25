@@ -83,7 +83,13 @@ pub enum AgentEvent {
     /// Prompt waits behind the running turn.
     Queued { turn_id: String, position: usize },
     TurnStarted { turn_id: String },
-    TextDelta { text: String },
+    /// Text for the user. `phase: "commentary"` marks an interim update the
+    /// agent sends while it keeps working (Codex), not part of its answer.
+    TextDelta {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
+    },
     Reasoning { text: String },
     ToolStart {
         call_id: String,

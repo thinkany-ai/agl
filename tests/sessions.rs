@@ -66,7 +66,7 @@ async fn turn(mgr: &Arc<Manager>, rx: &mut Receiver<EventEnvelope>, sid: &str, t
             }
             match &env.event {
                 AgentEvent::TurnStarted { turn_id: id } if *id == turn_id => started = true,
-                AgentEvent::TextDelta { text } if started => t.text.push_str(text),
+                AgentEvent::TextDelta { text, .. } if started => t.text.push_str(text),
                 AgentEvent::PermissionRequest { request_id, .. } => {
                     if let Some(d) = decision {
                         mgr.approve(sid, request_id, d).await.expect("approve");
@@ -197,7 +197,7 @@ async fn sessions_end_to_end() {
 
     // --- Persistence ----------------------------------------------------------
     let history = mgr.history(&r, 0, None).unwrap();
-    assert!(history.iter().any(|e| matches!(&e.event, AgentEvent::TextDelta { text } if text == "banana")));
+    assert!(history.iter().any(|e| matches!(&e.event, AgentEvent::TextDelta { text, .. } if text == "banana")));
 
     mgr.shutdown_all().await;
 }

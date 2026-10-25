@@ -30,6 +30,8 @@ struct TurnState {
     usage: Option<Value>,
     wrote_text: bool,
     limit: usize,
+    /// Agent message ids Codex marked `phase: commentary` (interim updates).
+    commentary: std::collections::HashSet<String>,
 }
 
 enum Approval {
@@ -335,7 +337,8 @@ fn map_notification(method: &str, p: &Value, state: &Arc<Mutex<TurnState>>) -> V
     match method {
         "item/agentMessage/delta" => {
             s.wrote_text = true;
-            ev(AgentEvent::TextDelta { text: p["delta"].as_str().unwrap_or_default().into() })
+            let phase = p["itemId"].as_str().filter(|id| s.commentary.contains(*id)).map(|_| "commentary".to_string());
+            ev(AgentEvent::TextDelta { text: p["delta"].as_str().unwrap_or_default().into(), phase })
         }
         m if m.starts_with("item/reasoning/") && m.ends_with("Delta") => {
             ev(AgentEvent::Reasoning { text: p["delta"].as_str().unwrap_or_default().into() })
@@ -343,8 +346,16 @@ fn map_notification(method: &str, p: &Value, state: &Arc<Mutex<TurnState>>) -> V
         "item/started" => {
             let item = &p["item"];
             let ty = item["type"].as_str().unwrap_or_default();
-            if ty == "agentMessage" && s.wrote_text {
-                return ev(AgentEvent::TextDelta { text: "\n\n".into() });
+            if ty == "agentMessage" {
+                let commentary = item["phase"].as_str() == Some("commentary");
+                if let (true, Some(id)) = (commentary, item["id"].as_str()) {
+                    s.commentary.insert(id.to_string());
+                }
+                if s.wrote_text {
+                    let phase = commentary.then(|| "commentary".to_string());
+                    return ev(AgentEvent::TextDelta { text: "\n\n".into(), phase });
+                }
+                return vec![];
             }
             if !TOOL_ITEMS.contains(&ty) {
                 return vec![];
@@ -432,6 +443,7 @@ fn map_notification(method: &str, p: &Value, state: &Arc<Mutex<TurnState>>) -> V
         }
         "turn/completed" => {
             s.turn_id = None;
+            s.commentary.clear();
             let turn = &p["turn"];
             let (outcome, error) = match turn["status"].as_str() {
                 Some("completed") => ("completed", None),
@@ -508,7 +520,12 @@ mod tests {
     fn maps_a_turn() {
         let s = state();
         let ev = events(map_notification("item/agentMessage/delta", &json!({"threadId": "t1", "delta": "hi"}), &s));
-        assert!(matches!(&ev[0], AgentEvent::TextDelta { text } if text == "hi"));
+        assert!(matches!(&ev[0], AgentEvent::TextDelta { text, phase: None } if text == "hi"));
+
+        let note = json!({"type": "agentMessage", "id": "m1", "phase": "commentary"});
+        map_notification("item/started", &json!({"threadId": "t1", "item": note}), &s);
+        let ev = events(map_notification("item/agentMessage/delta", &json!({"threadId": "t1", "itemId": "m1", "delta": "Looking"}), &s));
+        assert!(matches!(&ev[0], AgentEvent::TextDelta { phase: Some(p), .. } if p == "commentary"));
 
         let item = json!({"type": "commandExecution", "id": "c1", "command": "ls", "cwd": "/", "status": "inProgress"});
         let ev = events(map_notification("item/started", &json!({"threadId": "t1", "item": item}), &s));

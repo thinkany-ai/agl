@@ -365,7 +365,7 @@ fn map_update(u: &Value, state: &Arc<Mutex<State>>) -> Vec<DriverMsg> {
                 return vec![];
             }
             s.wrote_text = true;
-            ev(AgentEvent::TextDelta { text: t })
+            ev(AgentEvent::TextDelta { text: t, phase: None })
         }
         "agent_thought_chunk" => ev(AgentEvent::Reasoning { text: content_text(&u["content"]) }),
         "tool_call" => {
@@ -376,7 +376,7 @@ fn map_update(u: &Value, state: &Arc<Mutex<State>>) -> Vec<DriverMsg> {
             let mut out = Vec::new();
             if s.wrote_text {
                 s.wrote_text = false;
-                out.push(DriverMsg::Event(AgentEvent::TextDelta { text: "\n\n".into() }));
+                out.push(DriverMsg::Event(AgentEvent::TextDelta { text: "\n\n".into(), phase: None }));
             }
             let name = u["title"].as_str().or(u["kind"].as_str()).unwrap_or("tool").to_string();
             let input = u.get("rawInput").cloned().unwrap_or_else(|| json!({"kind": u["kind"], "locations": u["locations"]}));
@@ -466,7 +466,7 @@ mod tests {
     fn maps_session_updates() {
         let s = Arc::new(Mutex::new(State { live: true, limit: 1024, ..Default::default() }));
         let text = map_update(&json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hi"}}), &s);
-        assert!(matches!(&text[0], DriverMsg::Event(AgentEvent::TextDelta { text }) if text == "hi"));
+        assert!(matches!(&text[0], DriverMsg::Event(AgentEvent::TextDelta { text, .. }) if text == "hi"));
 
         let start = map_update(&json!({"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Bash", "rawInput": {"command": "ls"}}), &s);
         assert!(start.iter().any(|m| matches!(m, DriverMsg::Event(AgentEvent::ToolStart { call_id, .. }) if call_id == "t1")));

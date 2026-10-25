@@ -28,7 +28,8 @@ export type AgentEvent =
   | { kind: "queued"; turn_id: string; position: number }
   | { kind: "steered"; turn_id: string; into_turn_id: string }
   | { kind: "turn_started"; turn_id: string }
-  | { kind: "text_delta"; text: string }
+  /** `phase: "commentary"`: an interim update while the agent keeps working (Codex). */
+  | { kind: "text_delta"; text: string; phase?: "commentary" }
   | { kind: "reasoning"; text: string }
   | { kind: "tool_start"; call_id: string; name: string; input: unknown }
   | { kind: "tool_end"; call_id: string; ok: boolean; output: string; images?: ToolImage[] }
@@ -231,7 +232,7 @@ export class AglClient {
           return resolve({ turn_id: turnId, outcome: e.outcome, error: e.error, usage: e.usage, timing: e.timing, text: reply });
         }
         if (!started) return;
-        if (e.kind === "text_delta") reply += e.text;
+        if (e.kind === "text_delta" && e.phase !== "commentary") reply += e.text;
         o.onEvent?.(e);
         if (e.kind === "permission_request" && o.onPermission) {
           const d = await o.onPermission(e);

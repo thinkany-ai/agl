@@ -200,7 +200,7 @@ impl State {
                         Some("text_delta") => {
                             if let Some(t) = d["text"].as_str() {
                                 self.wrote_text = true;
-                                out.push(ev(AgentEvent::TextDelta { text: t.into() }));
+                                out.push(ev(AgentEvent::TextDelta { text: t.into(), phase: None }));
                             }
                         }
                         Some("thinking_delta") => {
@@ -211,7 +211,7 @@ impl State {
                         _ => {}
                     }
                 } else if e["type"] == "content_block_start" && e["content_block"]["type"] == "text" && self.wrote_text {
-                    out.push(ev(AgentEvent::TextDelta { text: "\n\n".into() }));
+                    out.push(ev(AgentEvent::TextDelta { text: "\n\n".into(), phase: None }));
                 }
             }
             "assistant" => {
@@ -327,7 +327,7 @@ mod tests {
     fn maps_stream_json() {
         let mut s = State { wrote_text: false, limit: 1024 };
         let delta = json!({"type": "stream_event", "parent_tool_use_id": null, "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "hi"}}});
-        assert!(matches!(&s.map(&delta)[0], DriverMsg::Event(AgentEvent::TextDelta { text }) if text == "hi"));
+        assert!(matches!(&s.map(&delta)[0], DriverMsg::Event(AgentEvent::TextDelta { text, .. }) if text == "hi"));
 
         let child = json!({"type": "stream_event", "parent_tool_use_id": "tu9", "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "sub"}}});
         assert!(s.map(&child).is_empty(), "subagent text is not the main transcript");

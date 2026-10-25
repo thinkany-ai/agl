@@ -187,7 +187,7 @@ is what the runtime reported running. `origin` is `local` or a hub URL.
 | `queued` | `turn_id, position` | |
 | `steered` | `turn_id, into_turn_id` | This input was injected into a running turn; it gets no turn of its own |
 | `turn_started` | `turn_id` | |
-| `text_delta` | `text` | Append in order. `"\n\n"` separates the agent's messages. |
+| `text_delta` | `text`, `phase?` | Append in order. `"\n\n"` separates the agent's messages. `phase: "commentary"` (Codex, from agl 0.3.1) marks an interim update the agent gives while it keeps working, e.g. what it will do first; show it as progress, not as part of the answer. |
 | `reasoning` | `text` | Thinking, where the runtime exposes it |
 | `tool_start` | `call_id, name, input` | |
 | `tool_end` | `call_id, ok, output, images?` | `output` is the tool's text, capped at `tool_output_limit` (16KB). `images` are the images it returned, e.g. Codex computer-use screenshots: `[{mime_type, data (base64), omitted?}]`. Images over 4MB, and images beyond the newest `history_image_limit` in `session.history`, arrive with `omitted: true` and no data. |

@@ -699,7 +699,7 @@ impl Renderer {
             return;
         }
         match &env.event {
-            AgentEvent::TextDelta { text } => {
+            AgentEvent::TextDelta { text, .. } => {
                 // No blank lines right after a tool/meta line.
                 let text = if self.at_line_start { text.trim_start_matches('\n') } else { text.as_str() };
                 if text.is_empty() {

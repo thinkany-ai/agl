@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
             continue;
         }
         match env.event {
-            AgentEvent::TextDelta { text } => print!("{text}"),
+            AgentEvent::TextDelta { text, .. } => print!("{text}"),
             AgentEvent::PermissionRequest { request_id, .. } => mgr.approve(&s.id, &request_id, "deny").await?,
             AgentEvent::TurnEnded { turn_id: t, outcome, timing, .. } if t == turn_id => {
                 println!("\n[{outcome}] {}", timing.unwrap_or_default());

@@ -109,7 +109,7 @@ impl OneShotDriver {
             let mut turn = std::mem::take(&mut *turn.lock().unwrap());
             if !turn.text_seen {
                 if let Some(text) = turn.final_text.take().filter(|s| !s.is_empty()) {
-                    let _ = tx.send((gen, DriverMsg::Event(AgentEvent::TextDelta { text })));
+                    let _ = tx.send((gen, DriverMsg::Event(AgentEvent::TextDelta { text, phase: None })));
                 }
             }
             let msg = match status {
@@ -159,7 +159,7 @@ fn map(proto: Protocol, f: &Value, turn: &mut Turn, limit: usize) -> Vec<DriverM
                     let text: String = f["message"]["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect();
                     if !text.is_empty() && f.get("timestamp_ms").is_some() {
                         turn.text_seen = true;
-                        out.push(ev(AgentEvent::TextDelta { text }));
+                        out.push(ev(AgentEvent::TextDelta { text, phase: None }));
                     } else if !text.is_empty() && !turn.text_seen {
                         turn.final_text = Some(text);
                     }
@@ -200,7 +200,7 @@ fn map(proto: Protocol, f: &Value, turn: &mut Turn, limit: usize) -> Vec<DriverM
                 match e["type"].as_str() {
                     Some("text_delta") => {
                         turn.text_seen = true;
-                        out.push(ev(AgentEvent::TextDelta { text: e["delta"].as_str().unwrap_or_default().into() }));
+                        out.push(ev(AgentEvent::TextDelta { text: e["delta"].as_str().unwrap_or_default().into(), phase: None }));
                     }
                     Some("thinking_delta") => out.push(ev(AgentEvent::Reasoning { text: e["delta"].as_str().unwrap_or_default().into() })),
                     _ => {}
