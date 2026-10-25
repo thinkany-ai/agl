@@ -30,8 +30,8 @@ ignore what they do not know. Only an incompatible change bumps the version.
 
 ## HTTP link
 
-The machine link can also run over plain HTTPS requests, for backends that
-cannot hold one WebSocket per machine (several stateless instances, a WAF, a
+From agl 0.3.0, the machine link can also run over plain HTTPS requests, for
+backends that cannot hold one WebSocket per machine (several stateless instances, a WAF, a
 serverless host). The machine chooses it with `agl connect <hub> --transport
 http`; the hub's install command can pass that flag in `__CONNECT_ARGS__`.
 The messages are exactly the WebSocket link's; only how they travel differs.
@@ -109,7 +109,7 @@ access (default `ask`).
 | method | params | result / notes |
 |---|---|---|
 | `ping` | – | `{pong, version, protocol}` |
-| `machine.info` | – | `{machine_id, hostname, os, arch, version, protocol, agents[], home, started_at}`. `home` is the user's home directory; `started_at` (unix ms) changes when the daemon restarts, which ends every running turn: a hub that sees a new value in `hello` can fail the turns it was waiting for. |
+| `machine.info` | – | `{machine_id, hostname, os, arch, version, protocol, agents[], home, started_at}`. `home` is the user's home directory; `started_at` (unix ms) changes when the daemon restarts, which ends every running turn: a hub that sees a new value in `hello` can fail the turns it was waiting for. Both are absent before agl 0.3.0. |
 | `agents.list` | `{check_updates?}` | `AgentInfo[]`: `{id, name, protocol, available, path, version, features[], status, desktop_app?, install?, latest_version?, update?}`. See [Agent discovery](#agent-discovery). |
 | `agents.models` | `{agent}` | `{agent, models: [{id, name, description?, default?, efforts?[]}]}`. Never starts a conversation the user would see. |
 | `daemon.status` | – | Version, protocol, pid, port, `hubs: [{url, status, access, share_local}]` (a hub sees only its own entry), visible sessions, live processes, defaults |
@@ -135,9 +135,9 @@ access (default `ask`).
 | `fs.write` | `{path, content_base64}` | `{size}`. Creates parent directories and replaces the file atomically. |
 | `exec` | `{argv, cwd?, timeout_ms?, env?, stdin?}` | `{stdout, stderr, exit_code, timed_out, truncated}`. Runs `argv` without a shell, with the agents' environment (login-shell PATH), in its own process group; on timeout (default 10 min, max 30) the whole tree is killed. Output is kept up to 16 MiB per stream. |
 
-A hub gets `fs.*` and `exec` only as far as its link's access allows, since
-nobody is asked first: any link may `fs.read`, `edit` and `full` links may
-`fs.write`, and only `full` links may `exec`.
+`fs.*` and `exec` exist from agl 0.3.0. A hub gets them only as far as its
+link's access allows, since nobody is asked first: any link may `fs.read`,
+`edit` and `full` links may `fs.write`, and only `full` links may `exec`.
 
 `session_id` accepts any of: the id, the session name, or an id prefix of at
 least 4 characters.

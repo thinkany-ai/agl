@@ -1,6 +1,6 @@
 [package]
 name = "agl"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "AgentLink: drive local coding agents (Claude Code, Codex) from the CLI or a remote web app"
 license = "MIT"
