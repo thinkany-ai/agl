@@ -86,10 +86,15 @@ async fn run_link(d: Arc<Daemon>, url: String) {
             "http" => crate::link_http::connect_once(&d, &link, kind, &secret, &mut http_state).await,
             _ => connect_once(&d, &link, kind, &secret).await,
         };
+        // A link that got as far as `connected` dropped, not failed to come
+        // up: dial again soon instead of after the delays earlier outages built.
+        if d.hub_status.lock().unwrap().get(&url).is_some_and(|s| s == "connected") {
+            backoff = 1;
+        }
         match attempt {
             // Just paired: `supervise` restarts the link with the new token.
             Ok(()) => return,
-            Err(e) if is_unauthorized(&e) => {
+            Err(e) if is_unauthorized(&e, kind == "code") => {
                 // Revoked or expired: retrying cannot help. Wait for `agl connect`.
                 let what = if kind == "code" { "pairing code is invalid or expired" } else { "this machine was revoked" };
                 set_status(&d, &url, format!("unauthorized: {what}; run `agl connect` again"));
@@ -106,12 +111,21 @@ async fn run_link(d: Arc<Daemon>, url: String) {
     }
 }
 
-fn is_unauthorized(e: &anyhow::Error) -> bool {
+/// Whether the hub refused the credentials, so retrying cannot help. A
+/// token is revoked only by a 401: a 403 also comes from WAFs and proxies in
+/// front of the hub, and stopping on one would leave the machine offline for
+/// good. A pairing code the hub turned down (401 or 403) stays turned down.
+fn is_unauthorized(e: &anyhow::Error, pairing: bool) -> bool {
     e.chain().any(|c| {
         c.is::<crate::link_http::Unauthorized>()
             || matches!(c.downcast_ref::<tokio_tungstenite::tungstenite::Error>(),
-                Some(tokio_tungstenite::tungstenite::Error::Http(resp)) if matches!(resp.status().as_u16(), 401 | 403))
+                Some(tokio_tungstenite::tungstenite::Error::Http(resp)) if refused(resp.status().as_u16(), pairing))
     })
+}
+
+/// An HTTP status that ends a link for good (`is_unauthorized`).
+pub(crate) fn refused(status: u16, pairing: bool) -> bool {
+    status == 401 || (pairing && status == 403)
 }
 
 /// Swap the link's pairing code for the token the hub issued. The changed
@@ -215,4 +229,21 @@ pub fn urlencode(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_401_revokes_a_token() {
+        assert!(refused(401, false));
+        assert!(!refused(403, false), "a WAF's 403 must not stop the link for good");
+        assert!(!refused(500, false));
+        assert!(refused(401, true));
+        assert!(refused(403, true), "a refused pairing code stays refused");
+        let revoked = anyhow::Error::new(crate::link_http::Unauthorized).context("POST /machine/poll");
+        assert!(is_unauthorized(&revoked, false));
+        assert!(!is_unauthorized(&anyhow::anyhow!("POST /machine/poll: HTTP 403 Forbidden"), false));
+    }
 }

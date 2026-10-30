@@ -75,10 +75,13 @@ Over HTTP (`agl connect --transport http`), the same messages travel as
 What the daemon does on its side:
 - sends a WebSocket ping every 20s, and reconnects if it hears nothing for 60s
   (over HTTP: polls continuously; a poll is held at most 25s);
-- reconnects with exponential backoff up to 30s;
-- on HTTP 401 or 403 at upgrade, stops retrying and reports
+- reconnects with exponential backoff up to 30s, starting over at 1s once a
+  link that was up drops;
+- on HTTP 401 at upgrade, stops retrying and reports
   `unauthorized … run agl connect again`. That is how revocation works:
-  delete the token hash and close the socket.
+  delete the token hash and close the socket. A 403 is retried, since WAFs
+  and proxies send it too (a pairing code refused with 401 or 403 stays
+  refused).
 
 Methods you will use most:
 - `machine.info`, `agents.list`, `agents.models`

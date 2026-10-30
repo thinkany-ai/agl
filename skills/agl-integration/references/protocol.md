@@ -68,11 +68,13 @@ Delivery:
 - **Presence.** A machine is online from its `hello` while it keeps polling.
   It polls again as soon as a poll returns, so mark it offline when no poll
   has been open for about 60 s.
-- **Errors.** 401 or 403 on any call means the token is revoked: the machine
-  stops retrying and reports `unauthorized … run agl connect again`. 409 on
+- **Errors.** 401 on any call means the token is revoked: the machine
+  stops retrying and reports `unauthorized … run agl connect again`. A 403
+  is retried like any other error (WAFs and proxies send it too); on `pair`,
+  401 and 403 both refuse the code for good. 409 on
   `poll` means you have no `hello` for it (for instance after a restart): the
   machine reconnects and sends `hello` again. Anything else is retried with
-  backoff up to 30 s.
+  backoff up to 30 s, starting over at 1 s once a link that was up drops.
 
 The state this needs (the request queue with cursors, the last `seq` per
 session, the last poll time) fits in a database or Redis, so any instance

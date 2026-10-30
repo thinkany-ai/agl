@@ -51,7 +51,7 @@ const SEND_ATTEMPTS: u32 = 3;
 /// Request ids remembered for redelivery.
 const SEEN_CAP: usize = 1024;
 
-/// The hub refused the machine's credentials (401/403): retrying cannot help.
+/// The hub refused the machine's credentials (`link::refused`): retrying cannot help.
 #[derive(Debug)]
 pub struct Unauthorized;
 
@@ -150,7 +150,8 @@ impl Http {
         }
         let resp = req.send().await.with_context(|| format!("POST {path}"))?;
         let status = resp.status();
-        if matches!(status.as_u16(), 401 | 403) {
+        // Only pairing goes without a token.
+        if crate::link::refused(status.as_u16(), self.token.is_none()) {
             return Err(anyhow::Error::new(Unauthorized).context(format!("POST {path}")));
         }
         if !status.is_success() {
