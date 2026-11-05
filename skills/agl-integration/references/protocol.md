@@ -127,7 +127,7 @@ access (default `ask`).
 | | | `steer`: inject into the running turn (claude, codex); otherwise falls back to queue. |
 | | | `interrupt`: stop the current turn, then run this one. |
 | | | `turn_id`: your own id, max 64 chars. |
-| `session.approve` | `{session_id, request_id, decision}` | `decision` is `allow`, `allow_session` or `deny` |
+| `session.approve` | `{session_id, request_id, decision}` | `decision` is `allow`, `allow_session` or `deny`. `allow_session` (from agl 0.3.4) allows every later request of the session too: agl answers them itself until the session's access changes (`session.get` → `allow_session: true`). |
 | `session.abort` | `{session_id}` | Interrupts the running turn and cancels queued prompts. If the runtime has not ended the turn after 10s, the process tree is killed. |
 | `session.warm` | `{session_id}` | Pre-starts the agent process. |
 | `session.configure` | `{session_id, model?, effort?, access?, name?}` | `SessionMeta`. Changing model, effort or access restarts the process before the next turn and resumes the conversation natively, so context is kept. |
@@ -195,8 +195,8 @@ is what the runtime reported running. `origin` is `local` or a hub URL.
 | `tool_start` | `call_id, name, input` | |
 | `tool_end` | `call_id, ok, output, images?` | `output` is the tool's text, capped at `tool_output_limit` (16KB). `images` are the images it returned, e.g. Codex computer-use screenshots: `[{mime_type, data (base64), omitted?}]`. Images over 4MB, and images beyond the newest `history_image_limit` in `session.history`, arrive with `omitted: true` and no data. |
 | `plan` | `entries` | ACP plan, or claude TodoWrite `[{content, status}]` |
-| `permission_request` | `request_id, tool, title, input, options[], expires_at` | Answer with `session.approve` |
-| `permission_resolved` | `request_id, decision, by` | `by` is one of `client`, `policy`, `timeout`, `cancelled` |
+| `permission_request` | `request_id, tool, title, input, options[], expires_at, decided_by?` | Answer with `session.approve`. With `decided_by` (`policy`: the session's access; `session`: an earlier `allow_session`, from agl 0.3.4) agl answers it itself and `permission_resolved` follows at once: show it as a log line, don't ask the user. |
+| `permission_resolved` | `request_id, decision, by` | `by` is one of `client`, `policy`, `session`, `timeout`, `cancelled` |
 | `heartbeat` | `turn_id, elapsed_ms, idle_ms, stalled` | Every 15s while running. `stalled` means no output for 60s. Heartbeats are not stored in history. |
 | `retrying` | `message` | The runtime is retrying a model call, or agl switched credentials |
 | `turn_ended` | `turn_id, outcome, error?, usage?, timing?` | `outcome` is `completed`, `failed` or `aborted`. `timing` is `{warm, launch_ms, first_event_ms, first_text_ms, total_ms}`. |

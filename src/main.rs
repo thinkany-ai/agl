@@ -689,7 +689,7 @@ async fn run_turn(c: &mut Client, sid: &str, text: &str, mode: &str, json: bool)
                         renderer.render(&env, false);
                         return Ok("completed".into());
                     }
-                    AgentEvent::PermissionRequest { request_id, tool, title, input, .. } if started && !json && std::io::stdin().is_terminal() => {
+                    AgentEvent::PermissionRequest { request_id, tool, title, input, decided_by: None, .. } if started && !json && std::io::stdin().is_terminal() => {
                         renderer.render(&env, false);
                         let decision = ask_permission(tool, title, input).await;
                         if let Err(e) = c.call("session.approve", json!({"session_id": sid, "request_id": request_id, "decision": decision})).await {
@@ -778,6 +778,7 @@ impl Renderer {
             }
             AgentEvent::Queued { position, .. } => self.meta(env, &format!("[queued, position {position}]")),
             AgentEvent::Steered { .. } => self.meta(env, "[steered into the running turn]"),
+            AgentEvent::PermissionRequest { decided_by: Some(_), .. } => {}
             AgentEvent::PermissionRequest { tool, title, request_id, .. } => {
                 let s = format!("[permission] {tool}: {title} (agl approve {} {request_id} allow|deny)", env.session_id);
                 self.meta(env, &s)

@@ -64,6 +64,11 @@ pub struct SessionMeta {
     /// Permission requests waiting for an answer.
     #[serde(default)]
     pub pending_approvals: usize,
+    /// The user answered `allow_session`: agl allows the session's later
+    /// requests itself until its access changes. Agents' own "for this
+    /// session" is narrower (Claude Code asks again for every new command).
+    #[serde(default)]
+    pub allow_session: bool,
     /// warm, approvals, steer, interrupt, models, …
     #[serde(default)]
     pub features: Vec<String>,
@@ -327,6 +332,7 @@ impl Manager {
             queued: 0,
             live: false,
             pending_approvals: 0,
+            allow_session: false,
             features: def.protocol.features(),
             use_login: false,
             origin: origin.tag(),
@@ -402,6 +408,9 @@ impl Manager {
                 m.effort = Some(v).filter(|s| !s.is_empty());
             }
             if let Some(v) = p.access {
+                if v != m.access {
+                    m.allow_session = false;
+                }
                 m.access = v;
             }
             if let Some(v) = p.name {
@@ -738,6 +747,12 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                             (Some(p), Some(d)) => {
                                 let r = d.respond(&p.key, decision).await;
                                 emit!(AgentEvent::PermissionResolved { request_id, decision: decision.as_str().into(), by: "client".into() });
+                                if r.is_ok() && decision == Decision::AllowSession {
+                                    let changed = !std::mem::replace(&mut shared.meta.lock().unwrap().allow_session, true);
+                                    if changed {
+                                        mgr.persist();
+                                    }
+                                }
                                 r
                             }
                             _ => Err(anyhow!("no pending permission request `{request_id}`")),
@@ -794,14 +809,19 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                         mgr.persist();
                     }
                     DriverMsg::Permission(ask) => {
-                        let access = shared.meta.lock().unwrap().access.clone();
+                        let (access, allow_session) = {
+                            let m = shared.meta.lock().unwrap();
+                            (m.access.clone(), m.allow_session)
+                        };
                         let request_id = short_id();
                         let timeout = mgr.cfg.read().unwrap().approval_timeout_secs;
                         let policy = match access.as_str() {
-                            "read_only" => Some(Decision::Deny),
-                            "full" => Some(Decision::Allow),
+                            "read_only" => Some((Decision::Deny, "policy")),
+                            "full" => Some((Decision::Allow, "policy")),
+                            _ if allow_session => Some((Decision::AllowSession, "session")),
                             _ => None,
                         };
+                        let decided_by = policy.filter(|_| driver.is_some()).map(|(_, by)| by.to_string());
                         emit!(AgentEvent::PermissionRequest {
                             request_id: request_id.clone(),
                             tool: ask.tool,
@@ -809,11 +829,12 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                             input: ask.input,
                             options: ask.options,
                             expires_at: now_ms() + timeout * 1000,
+                            decided_by,
                         });
                         match (policy, driver.as_mut()) {
-                            (Some(dec), Some(d)) => {
+                            (Some((dec, by)), Some(d)) => {
                                 let _ = d.respond(&ask.key, dec).await;
-                                emit!(AgentEvent::PermissionResolved { request_id, decision: dec.as_str().into(), by: "policy".into() });
+                                emit!(AgentEvent::PermissionResolved { request_id, decision: dec.as_str().into(), by: by.into() });
                             }
                             _ => {
                                 approvals.insert(request_id, Pending { key: ask.key, expires: Instant::now() + Duration::from_secs(timeout) });

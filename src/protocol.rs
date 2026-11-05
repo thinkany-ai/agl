@@ -131,8 +131,13 @@ pub enum AgentEvent {
         options: Vec<String>,
         /// Unix ms after which agl denies it.
         expires_at: u64,
+        /// Set when agl answers it itself (`policy`: the session's access;
+        /// `session`: an earlier `allow_session`). A `permission_resolved`
+        /// follows at once; don't ask the user.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decided_by: Option<String>,
     },
-    /// decision: allow | allow_session | deny; by: client | policy | timeout | cancelled
+    /// decision: allow | allow_session | deny; by: client | policy | session | timeout | cancelled
     PermissionResolved { request_id: String, decision: String, by: String },
     /// Every 15s while a turn runs. `stalled` after 60s without agent output.
     Heartbeat { turn_id: String, elapsed_ms: u64, idle_ms: u64, stalled: bool },

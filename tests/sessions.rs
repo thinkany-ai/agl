@@ -191,9 +191,28 @@ async fn sessions_end_to_end() {
     assert!(has(&t.events, |e| matches!(e, AgentEvent::ToolStart { name, .. } if name == "Bash")));
     let t = turn(&mgr, &mut rx, &c, "TOOL", "queue", Some("deny")).await;
     assert_eq!(t.text, "deny");
+    // allow_session covers the session's later requests: agl answers them
+    // itself (claude would ask again for every new command).
+    let t = turn(&mgr, &mut rx, &c, "TOOL", "queue", Some("allow_session")).await;
+    assert_eq!(t.text, "allow");
+    assert!(mgr.get(&c).unwrap().allow_session);
+    let t = turn(&mgr, &mut rx, &c, "TOOL", "queue", None).await;
+    assert_eq!(t.text, "allow", "allowed for the session, not denied on timeout");
+    assert!(has(&t.events, |e| matches!(e, AgentEvent::PermissionRequest { decided_by: Some(by), .. } if by == "session")));
+    assert!(has(&t.events, |e| matches!(e, AgentEvent::PermissionResolved { by, .. } if by == "session")));
+    // A one-off allow grants nothing; changing access drops the grant.
+    let c1 = create(&mgr, "mockclaude", "ask", None);
+    turn(&mgr, &mut rx, &c1, "TOOL", "queue", Some("allow")).await;
+    assert!(!mgr.get(&c1).unwrap().allow_session);
+    mgr.configure(&c, agl::session::ConfigureParams { access: Some("edit".into()), ..Default::default() }).unwrap();
+    assert!(!mgr.get(&c).unwrap().allow_session);
+    let t = turn(&mgr, &mut rx, &c, "TOOL", "queue", None).await;
+    assert_eq!(t.text, "deny", "after an access change it asks again (and times out)");
+
     let cf = create(&mgr, "mockclaude", "full", None);
     let t = turn(&mgr, &mut rx, &cf, "TOOL", "queue", None).await;
     assert_eq!(t.text, "allow", "full access allows by policy");
+    assert!(has(&t.events, |e| matches!(e, AgentEvent::PermissionRequest { decided_by: Some(by), .. } if by == "policy")));
 
     // --- Persistence ----------------------------------------------------------
     let history = mgr.history(&r, 0, None).unwrap();
