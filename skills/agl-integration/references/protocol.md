@@ -112,7 +112,7 @@ access (default `ask`).
 |---|---|---|
 | `ping` | – | `{pong, version, protocol}` |
 | `machine.info` | – | `{machine_id, hostname, os, arch, version, protocol, agents[], home, started_at}`. `home` is the user's home directory; `started_at` (unix ms) changes when the daemon restarts, which ends every running turn: a hub that sees a new value in `hello` can fail the turns it was waiting for. Both are absent before agl 0.3.0. |
-| `agents.list` | `{check_updates?}` | `AgentInfo[]`: `{id, name, protocol, available, path, version, features[], status, desktop_app?, install?, latest_version?, update?}`. See [Agent discovery](#agent-discovery). |
+| `agents.list` | `{check_updates?}` | `AgentInfo[]`: `{id, name, protocol, available, path, version, features[], status, desktop_app?, install?, latest_version?, update?, capabilities?}`. See [Agent discovery](#agent-discovery). |
 | `agents.models` | `{agent}` | `{agent, models: [{id, name, description?, default?, efforts?[]}]}`. Never starts a conversation the user would see. |
 | `daemon.status` | – | Version, protocol, pid, port, `hubs: [{url, status, access, share_local}]` (a hub sees only its own entry), visible sessions, `busy` (sessions with a turn running or queued, from agl 0.3.2), live processes, defaults |
 | `daemon.update` | `{if_idle?}` | From agl 0.3.2. Updates agl to the newest release (checked against its sha256) and restarts the daemon on it: `{updated, current, latest, busy?, busy_elsewhere?}`. With `if_idle`, nothing happens while a session runs a turn (`busy`). A restart ends running turns, so a hub never ends another's: while a session the hub did not create (another hub's, or a local one) runs a turn, nothing happens even without `if_idle` (`busy_elsewhere`, also counted in `busy`). Any hub link may call it (from agl 0.3.5; before, `full` only): it installs only the official release, never a binary the hub picks. Below `full`, the update always behaves as `if_idle`; the link comes back by itself. An agl inside an app bundle is updated with the app instead. |
@@ -260,9 +260,10 @@ How to use this in a product: [discovery.md](discovery.md).
 | `install.source` | How the found binary was installed: `npm` (with `package`, `prefix`), `bun`, `brew`, `native` (self-updating install), `app-bundle` (the Codex inside Codex.app/ChatGPT.app, updated with the app), `unknown` |
 | `install.install_command` / `update_command` | A shell command for a missing / installed agent, e.g. `npm install --global --prefix '<prefix>' @openai/codex@latest`. Show it to the user to confirm; agl never runs it. |
 | `install.guide` | The agent's install docs |
+| `capabilities` | From agl 0.3.6: what the agent can do beyond code on this machine — `image_generation` (Codex with its `image_generation` feature on), `browser` (Codex `browser_use`), `web_search` (Claude Code). Omitted when none or unknown (custom agents). A hub can offer matching actions, e.g. image generation only where an agent reports it. |
 | `latest_version`, `update` | Only with `check_updates: true` (`agl agents --check-updates`): the newest published version (npm, GitHub releases, the vendor's channel) and `available`, `current` or `unknown`. Unparseable versions are `unknown`, never `current`. Takes a few seconds and goes through the user's proxy. |
 
-Custom agents carry no `install` or update fields. Detection only reads; nothing is installed or launched other than `<agent> --version`.
+Custom agents carry no `install` or update fields. Detection only reads; nothing is installed or launched other than `<agent> --version` (and `codex features list`).
 
 ## Configuration (`$AGL_HOME/config.json`)
 

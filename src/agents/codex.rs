@@ -457,6 +457,32 @@ fn map_notification(method: &str, p: &Value, state: &Arc<Mutex<TurnState>>) -> V
 }
 
 /// `model/list` from a short-lived app-server (no thread is created).
+/// Capabilities from `codex features list` (`<name> <stage> <enabled>` per
+/// line): image generation and the browser when their flags are on.
+pub(crate) async fn capabilities(bin: &Path) -> Vec<String> {
+    match super::run_capture(bin, &["features", "list"], Duration::from_secs(8)).await {
+        Some(out) => parse_capabilities(&out),
+        None => Vec::new(),
+    }
+}
+
+fn parse_capabilities(out: &str) -> Vec<String> {
+    let mut caps = Vec::new();
+    for line in out.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        let (Some(name), Some(&"true")) = (cols.first(), cols.last()) else { continue };
+        let cap = match *name {
+            "image_generation" => "image_generation",
+            "browser_use" => "browser",
+            _ => continue,
+        };
+        if !caps.iter().any(|c| c == cap) {
+            caps.push(cap.to_string());
+        }
+    }
+    caps
+}
+
 pub async fn list_models(bin: &Path) -> Result<Vec<Value>> {
     let spec = super::probe_spec("codex", super::Protocol::Codex);
     let mut child = app_server(bin, &spec).spawn()?;
@@ -506,6 +532,19 @@ pub async fn list_models(bin: &Path) -> Result<Vec<Value>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn capabilities_from_feature_flags() {
+        let out = "apps                                     stable             true\n\
+browser_use                              stable             true\n\
+image_generation                         stable             true\n\
+image_detail_original                    removed            false\n\
+standalone_web_search                    under development  false\n";
+        assert_eq!(super::parse_capabilities(out), vec!["browser", "image_generation"]);
+        let off = "image_generation                         stable             false\nbrowser_use stable false\n";
+        assert!(super::parse_capabilities(off).is_empty());
+        assert!(super::parse_capabilities("").is_empty());
+    }
+
     use super::*;
 
     fn state() -> Arc<Mutex<TurnState>> {

@@ -320,12 +320,12 @@ pub async fn detect(cfg: &Config, check_updates: bool) -> Vec<AgentInfo> {
         let builtin = !custom.contains(&d.id);
         async move {
             let path = find_binary(&d);
-            let (version, latest_version) = match &path {
+            let (version, latest_version, capabilities) = match &path {
                 Some(p) => {
                     let latest = async { if check_updates && builtin { install::latest_version(&d.id).await } else { None } };
-                    tokio::join!(version_of(p), latest)
+                    tokio::join!(version_of(p), latest, capabilities_of(d.protocol, p, builtin))
                 }
-                None => (None, None),
+                None => (None, None, Vec::new()),
             };
             let desktop_app = builtin.then(|| install::desktop_app(&d.id)).flatten();
             let status = if path.is_some() {
@@ -350,10 +350,26 @@ pub async fn detect(cfg: &Config, check_updates: bool) -> Vec<AgentInfo> {
                 desktop_app: desktop_app.map(|p| p.display().to_string()),
                 latest_version,
                 update,
+                capabilities,
             }
         }
     });
     futures_util::future::join_all(probes).await
+}
+
+/// What a built-in agent can do beyond code on this machine (AgentInfo
+/// `capabilities`). Custom agents are the user's own commands: none.
+async fn capabilities_of(protocol: Protocol, bin: &std::path::Path, builtin: bool) -> Vec<String> {
+    if !builtin {
+        return Vec::new();
+    }
+    match protocol {
+        // Its feature flags say whether image generation and the browser are on.
+        Protocol::Codex => codex::capabilities(bin).await,
+        // WebSearch / WebFetch are built-in Claude Code tools.
+        Protocol::Claude => vec!["web_search".into()],
+        _ => Vec::new(),
+    }
 }
 
 async fn version_of(p: &std::path::Path) -> Option<String> {

@@ -223,6 +223,11 @@ pub struct AgentInfo {
     /// Only when updates were checked: available | current | unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<String>,
+    /// What the agent itself can do beyond code, as detected on this machine
+    /// (agl 0.3.6+): `image_generation`, `web_search`, `browser`. Empty when
+    /// none or unknown (custom agents, older agl).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 /// How an agent is installed or updated. Commands are shell commands for the
