@@ -175,16 +175,24 @@ async fn wait_exit(pid: i32) {
 /// a service manager starts the new binary when this one exits; otherwise a
 /// detached shell starts it once this one has let go of its port.
 pub fn relaunch_after_exit() -> Result<()> {
-    // The service restarts its own daemon; any other daemon restarts itself.
-    if service::runs_this_process() {
-        return Ok(());
-    }
+    // The old daemon exits two seconds after answering (daemon.update).
+    let script = if service::runs_this_process() {
+        match service::kickstart_command() {
+            // launchd's KeepAlive may defer the respawn indefinitely
+            // ("pended nondemand spawn = inefficient"): ask for it now. A
+            // no-op if launchd already started the new daemon.
+            Some(kick) => format!("sleep 4; exec {kick}"),
+            // systemd restarts its own unit (Restart=always, RestartSec=3).
+            None => return Ok(()),
+        }
+    } else {
+        "sleep 5; exec \"$0\" daemon".to_string()
+    };
     let exe = std::env::current_exe()?;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(crate::config::log_path())?;
     let mut cmd = std::process::Command::new("/bin/sh");
-    // The old daemon exits two seconds after answering (daemon.update).
     cmd.arg("-c")
-        .arg("sleep 5; exec \"$0\" daemon")
+        .arg(script)
         .arg(exe)
         .stdin(std::process::Stdio::null())
         .stdout(log.try_clone()?)

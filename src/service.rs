@@ -41,6 +41,19 @@ fn cgroup() -> String {
     }
 }
 
+/// The shell command that makes the service start its daemon right away
+/// (macOS: launchd defers KeepAlive respawns), or None where the service
+/// restarts it promptly by itself (systemd).
+pub fn kickstart_command() -> Option<String> {
+    if cfg!(target_os = "macos") {
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        Some(format!("launchctl kickstart gui/{uid}/{LABEL}"))
+    } else {
+        None
+    }
+}
+
 /// launchd names the job in XPC_SERVICE_NAME; systemd puts the unit's
 /// processes in its own cgroup.
 fn started_by_service(xpc_service: Option<&str>, cgroup: &str) -> bool {
