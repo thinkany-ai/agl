@@ -569,17 +569,7 @@ async fn real_main() -> Result<()> {
             ServiceAction::Install => {
                 // A daemon the service manager does not own would hold the port
                 // and the home; systemd/launchd replace their own instance.
-                let managed = service::is_installed();
-                if let (false, Ok(c)) = (managed, Client::connect_local().await) {
-                    let pid = c.call("daemon.status", json!({})).await.ok().and_then(|s| s["pid"].as_u64()).unwrap_or(0) as i32;
-                    let _ = c.call("daemon.shutdown", json!({})).await;
-                    for _ in 0..100 {
-                        if pid <= 0 || unsafe { libc::kill(pid, 0) } != 0 {
-                            break;
-                        }
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                }
+                agl::update::stop_unmanaged_daemon().await;
                 service::install()
             }
             ServiceAction::Uninstall => service::uninstall(),
@@ -607,6 +597,8 @@ async fn status(cfg: &Config, as_json: bool) -> Result<()> {
             "daemon_version": daemon.as_ref().map(|s| s["version"].clone()),
             "pid": daemon.as_ref().map(|s| s["pid"].clone()),
             "busy": daemon.as_ref().map(|s| s["busy"].clone()),
+            // Started by the autostart service (agl 0.3.8+), which restarts it.
+            "managed": daemon.as_ref().map(|s| s["managed"].clone()),
             "machine_id": cfg.machine_id,
             "service": service::is_installed(),
             "hubs": hubs,

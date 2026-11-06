@@ -135,11 +135,33 @@ pub async fn install(version: &str) -> Result<PathBuf> {
 /// is stopped and started again.
 pub async fn restart_daemon() -> Result<()> {
     if service::is_installed() {
+        // A daemon the service doesn't own holds the port: stop it first, or
+        // the service's new instance can't start and the old one keeps running.
+        stop_unmanaged_daemon().await;
         return service::install();
     }
     let Ok(c) = client::Client::connect_local().await else { return Ok(()) };
     let pid = c.call("daemon.status", serde_json::json!({})).await.ok().and_then(|s| s["pid"].as_u64()).unwrap_or(0) as i32;
     let _ = c.call("daemon.shutdown", serde_json::json!({})).await;
+    wait_exit(pid).await;
+    client::spawn_detached_daemon()
+}
+
+/// Stops the running daemon unless the autostart service started it
+/// (`managed` in daemon.status; daemons before 0.3.8 don't say, and are
+/// treated as unmanaged — re-registering the service restarts its own).
+pub async fn stop_unmanaged_daemon() {
+    let Ok(c) = client::Client::connect_local().await else { return };
+    let Ok(st) = c.call("daemon.status", serde_json::json!({})).await else { return };
+    if st["managed"].as_bool() == Some(true) {
+        return;
+    }
+    let pid = st["pid"].as_u64().unwrap_or(0) as i32;
+    let _ = c.call("daemon.shutdown", serde_json::json!({})).await;
+    wait_exit(pid).await;
+}
+
+async fn wait_exit(pid: i32) {
     for _ in 0..100 {
         // SAFETY: signal 0 only checks for existence.
         if pid <= 0 || unsafe { libc::kill(pid, 0) } != 0 {
@@ -147,14 +169,14 @@ pub async fn restart_daemon() -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    client::spawn_detached_daemon()
 }
 
 /// From inside the daemon (`daemon.update`), once the answer has gone out:
 /// a service manager starts the new binary when this one exits; otherwise a
 /// detached shell starts it once this one has let go of its port.
 pub fn relaunch_after_exit() -> Result<()> {
-    if service::is_installed() {
+    // The service restarts its own daemon; any other daemon restarts itself.
+    if service::runs_this_process() {
         return Ok(());
     }
     let exe = std::env::current_exe()?;

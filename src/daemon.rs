@@ -336,6 +336,8 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
                 "sessions": mgr.list().iter().filter(|m| origin.sees(&m.origin)).count(),
                 // Sessions with a turn running, starting, waiting or queued.
                 "busy": mgr.list().iter().filter(|m| !crate::session::is_idle(m)).count(),
+                // Started by the autostart service (which restarts it), not `agl start`.
+                "managed": crate::service::runs_this_process(),
                 "live": mgr.live_count(),
                 "default_access": cfg.default_access,
                 "idle_timeout_secs": cfg.idle_timeout_secs,

@@ -25,6 +25,34 @@ pub fn is_installed() -> bool {
     unit_path().map(|p| p.exists()).unwrap_or(false)
 }
 
+/// Whether this process is the autostart service's own daemon, which the
+/// service restarts when it exits. The unit being installed is not enough:
+/// a daemon started with `agl start` (or by an installer's fallback) runs
+/// beside an idle unit, and nothing would bring it back.
+pub fn runs_this_process() -> bool {
+    is_installed() && started_by_service(std::env::var("XPC_SERVICE_NAME").ok().as_deref(), &cgroup())
+}
+
+fn cgroup() -> String {
+    if cfg!(target_os = "linux") {
+        std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default()
+    } else {
+        String::new()
+    }
+}
+
+/// launchd names the job in XPC_SERVICE_NAME; systemd puts the unit's
+/// processes in its own cgroup.
+fn started_by_service(xpc_service: Option<&str>, cgroup: &str) -> bool {
+    if cfg!(target_os = "macos") {
+        xpc_service == Some(LABEL)
+    } else if cfg!(target_os = "linux") {
+        cgroup.lines().any(|l| l.ends_with("/agl.service"))
+    } else {
+        false
+    }
+}
+
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
@@ -116,4 +144,22 @@ fn uid() -> String {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "501".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn service_daemon_is_recognized() {
+        if cfg!(target_os = "macos") {
+            assert!(started_by_service(Some(LABEL), ""));
+            // `agl start` from a shell: XPC_SERVICE_NAME is the terminal's or unset.
+            assert!(!started_by_service(Some("application.com.apple.Terminal.123"), ""));
+            assert!(!started_by_service(None, ""));
+        } else if cfg!(target_os = "linux") {
+            assert!(started_by_service(None, "0::/user.slice/user-1000.slice/user@1000.service/app.slice/agl.service\n"));
+            assert!(!started_by_service(None, "0::/user.slice/user-1000.slice/session-3.scope\n"));
+        }
+    }
 }
