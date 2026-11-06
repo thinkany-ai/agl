@@ -225,7 +225,7 @@ Rules for clients:
 
 | access | claude | codex app-server | ACP agents | cursor |
 |---|---|---|---|---|
-| `full` | `--dangerously-skip-permissions` | `danger-full-access`, approvals `never` | mode `yolo` / `bypassPermissions`; any request is auto-allowed | `--force` |
+| `full` | `--dangerously-skip-permissions` | `danger-full-access`, granular approvals: none asked except MCP elicitations (from 0.3.7; before, `never`) | mode `yolo` / `bypassPermissions`; any request is auto-allowed | `--force` |
 | `edit` | `acceptEdits` + approvals forwarded | `workspace-write`, `on-request` | mode `autoEdit` / `acceptEdits` + forwarded | prompts are not interactive |
 | `ask` | `default` + approvals forwarded | `workspace-write`, `untrusted` | mode `default` + forwarded | – |
 | `read_only` | `dontAsk` + read-only tool allowlist | `read-only`, approvals `never` | mode `plan`; requests are auto-denied | `--mode ask` |
@@ -235,6 +235,12 @@ How approval requests are handled:
   are then denied.
 - Under `full` they are auto-allowed, and under `read_only` auto-denied. In
   both cases `permission_resolved` reports `by: "policy"`.
+- Codex Computer Use (native apps and browsers, MCP server `cua_repl`) asks
+  before using each app: a `permission_request` with tool `mcp:cua_repl` and
+  the app in its title. `allow_session` keeps the grant for that app for the
+  session. Under `full` it is auto-allowed; with Codex's `never` policy
+  (agl < 0.3.7) Codex declined it itself, so Computer Use never worked there.
+  macOS must also grant Codex Screen Recording and Accessibility.
 
 ## Agents
 
@@ -260,7 +266,7 @@ How to use this in a product: [discovery.md](discovery.md).
 | `install.source` | How the found binary was installed: `npm` (with `package`, `prefix`), `bun`, `brew`, `native` (self-updating install), `app-bundle` (the Codex inside Codex.app/ChatGPT.app, updated with the app), `unknown` |
 | `install.install_command` / `update_command` | A shell command for a missing / installed agent, e.g. `npm install --global --prefix '<prefix>' @openai/codex@latest`. Show it to the user to confirm; agl never runs it. |
 | `install.guide` | The agent's install docs |
-| `capabilities` | From agl 0.3.6: what the agent can do beyond code on this machine — `image_generation` (Codex with its `image_generation` feature on), `browser` (Codex `browser_use`), `web_search` (Claude Code). Omitted when none or unknown (custom agents). A hub can offer matching actions, e.g. image generation only where an agent reports it. |
+| `capabilities` | From agl 0.3.6: what the agent can do beyond code on this machine — `image_generation` (Codex with its `image_generation` feature on), `browser` (Codex `browser_use`), `computer_use` (Codex `computer_use`, from 0.3.7), `web_search` (Claude Code). A flag means the tool is loaded, not that macOS granted Screen Recording / Accessibility. Omitted when none or unknown (custom agents). A hub can offer matching actions, e.g. image generation only where an agent reports it. |
 | `latest_version`, `update` | Only with `check_updates: true` (`agl agents --check-updates`): the newest published version (npm, GitHub releases, the vendor's channel) and `available`, `current` or `unknown`. Unparseable versions are `unknown`, never `current`. Takes a few seconds and goes through the user's proxy. |
 
 Custom agents carry no `install` or update fields. Detection only reads; nothing is installed or launched other than `<agent> --version` (and `codex features list`).

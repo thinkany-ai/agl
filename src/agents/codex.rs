@@ -70,10 +70,17 @@ fn tool_text(ty: &str, item: &Value, status: &str) -> String {
 
 fn thread_params(spec: &SpawnSpec) -> Value {
     let (sandbox, approval) = match spec.access.as_str() {
-        "full" => ("danger-full-access", "never"),
-        "read_only" => ("read-only", "never"),
-        "edit" => ("workspace-write", "on-request"),
-        _ => ("workspace-write", "untrusted"),
+        // `never` would also make Codex decline Computer Use's per-app
+        // confirmations (MCP elicitations), so native app and browser control
+        // could never work. Ask for nothing else, but let those through: the
+        // session's `full` policy answers them without the user.
+        "full" => (
+            "danger-full-access",
+            json!({"granular": {"sandbox_approval": false, "rules": false, "skill_approval": false, "request_permissions": false, "mcp_elicitations": true}}),
+        ),
+        "read_only" => ("read-only", json!("never")),
+        "edit" => ("workspace-write", json!("on-request")),
+        _ => ("workspace-write", json!("untrusted")),
     };
     let mut config = json!({});
     if sandbox == "workspace-write" {
@@ -458,7 +465,9 @@ fn map_notification(method: &str, p: &Value, state: &Arc<Mutex<TurnState>>) -> V
 
 /// `model/list` from a short-lived app-server (no thread is created).
 /// Capabilities from `codex features list` (`<name> <stage> <enabled>` per
-/// line): image generation and the browser when their flags are on.
+/// line): image generation, the browser and Computer Use when their flags
+/// are on. A flag only says the tool is loaded, not that the OS granted
+/// Screen Recording / Accessibility or that a browser is reachable.
 pub(crate) async fn capabilities(bin: &Path) -> Vec<String> {
     match super::run_capture(bin, &["features", "list"], Duration::from_secs(8)).await {
         Some(out) => parse_capabilities(&out),
@@ -474,6 +483,7 @@ fn parse_capabilities(out: &str) -> Vec<String> {
         let cap = match *name {
             "image_generation" => "image_generation",
             "browser_use" => "browser",
+            "computer_use" => "computer_use",
             _ => continue,
         };
         if !caps.iter().any(|c| c == cap) {
@@ -536,10 +546,11 @@ mod tests {
     fn capabilities_from_feature_flags() {
         let out = "apps                                     stable             true\n\
 browser_use                              stable             true\n\
+computer_use                             stable             true\n\
 image_generation                         stable             true\n\
 image_detail_original                    removed            false\n\
 standalone_web_search                    under development  false\n";
-        assert_eq!(super::parse_capabilities(out), vec!["browser", "image_generation"]);
+        assert_eq!(super::parse_capabilities(out), vec!["browser", "computer_use", "image_generation"]);
         let off = "image_generation                         stable             false\nbrowser_use stable false\n";
         assert!(super::parse_capabilities(off).is_empty());
         assert!(super::parse_capabilities("").is_empty());
@@ -621,10 +632,20 @@ standalone_web_search                    under development  false\n";
     #[test]
     fn access_maps_to_sandbox_and_approvals() {
         let mut spec = super::super::probe_spec("codex", super::super::Protocol::Codex);
-        for (access, sandbox, policy) in [("full", "danger-full-access", "never"), ("edit", "workspace-write", "on-request"), ("ask", "workspace-write", "untrusted"), ("read_only", "read-only", "never")] {
+        for (access, sandbox, policy) in [("edit", "workspace-write", "on-request"), ("ask", "workspace-write", "untrusted"), ("read_only", "read-only", "never")] {
             spec.access = access.into();
             let p = thread_params(&spec);
             assert_eq!((p["sandbox"].as_str(), p["approvalPolicy"].as_str()), (Some(sandbox), Some(policy)), "{access}");
+        }
+        // full: nothing is asked, except Computer Use's app confirmations,
+        // which the session's policy then answers itself.
+        spec.access = "full".into();
+        let p = thread_params(&spec);
+        assert_eq!(p["sandbox"], "danger-full-access");
+        let g = &p["approvalPolicy"]["granular"];
+        assert_eq!(g["mcp_elicitations"], true);
+        for k in ["sandbox_approval", "rules", "skill_approval", "request_permissions"] {
+            assert_eq!(g[k], false, "{k}");
         }
         spec.model = Some("gpt-x".into());
         assert_eq!(thread_params(&spec)["model"], "gpt-x", "the model is always repeated");

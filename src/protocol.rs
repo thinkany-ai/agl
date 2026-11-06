@@ -224,7 +224,8 @@ pub struct AgentInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<String>,
     /// What the agent itself can do beyond code, as detected on this machine
-    /// (agl 0.3.6+): `image_generation`, `web_search`, `browser`. Empty when
+    /// (agl 0.3.6+): `image_generation`, `web_search`, `browser`,
+    /// `computer_use` (0.3.7+). Empty when
     /// none or unknown (custom agents, older agl).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
