@@ -46,9 +46,7 @@ fn cgroup() -> String {
 /// restarts it promptly by itself (systemd).
 pub fn kickstart_command() -> Option<String> {
     if cfg!(target_os = "macos") {
-        // SAFETY: getuid has no preconditions.
-        let uid = unsafe { libc::getuid() };
-        Some(format!("launchctl kickstart gui/{uid}/{LABEL}"))
+        Some(format!("launchctl kickstart gui/{}/{LABEL}", uid()))
     } else {
         None
     }
@@ -108,6 +106,9 @@ pub fn install() -> Result<()> {
         if !out.status.success() {
             bail!("launchctl bootstrap failed: {}", String::from_utf8_lossy(&out.stderr));
         }
+        // RunAtLoad alone may leave the job pending ("pended nondemand spawn
+        // = speculative") and the daemon down: start it now.
+        let _ = Command::new("launchctl").args(["kickstart", &format!("{domain}/{LABEL}")]).output();
     } else {
         let unit = format!(
             "[Unit]\nDescription=AgentLink daemon\nAfter=network-online.target\n\n[Service]\nExecStart={exe} daemon\nEnvironment=PATH={path_env}\nRestart=always\nRestartSec=3\nStandardOutput=append:{log}\nStandardError=append:{log}\n\n[Install]\nWantedBy=default.target\n",
