@@ -42,6 +42,18 @@ pub(crate) fn allowed(cfg: &Config, origin: &Origin, method: &str) -> Result<()>
     }
 }
 
+/// Whether `daemon.update` from `origin` must wait until no turn runs.
+/// Any hub may update agl: it only installs the newest official release,
+/// checked against its sha256, never a binary or version the hub picks.
+/// Restarting ends running turns, though, so below `full` a hub's update
+/// always waits for its own sessions to be idle (`if_idle`).
+pub(crate) fn update_only_if_idle(cfg: &Config, origin: &Origin, if_idle: bool) -> bool {
+    match origin {
+        Origin::Local => if_idle,
+        Origin::Hub { url, .. } => if_idle || cfg.hub(url).map(|h| h.access.as_str()).unwrap_or("ask") != "full",
+    }
+}
+
 /// An absolute path, or one under the home directory (`~/…`).
 fn resolve(path: &str) -> Result<PathBuf> {
     if path.contains('\0') {
@@ -209,6 +221,18 @@ mod tests {
         let (cfg, hub) = hub_cfg("full");
         assert!(allowed(&cfg, &hub, "exec").is_ok());
         assert!(allowed(&Config::default(), &Origin::Local, "exec").is_ok());
+    }
+
+    #[test]
+    fn hub_updates_wait_for_idle_below_full() {
+        for access in ["read_only", "ask", "edit"] {
+            let (cfg, hub) = hub_cfg(access);
+            assert!(update_only_if_idle(&cfg, &hub, false), "{access}");
+        }
+        let (cfg, hub) = hub_cfg("full");
+        assert!(!update_only_if_idle(&cfg, &hub, false));
+        assert!(update_only_if_idle(&cfg, &hub, true));
+        assert!(!update_only_if_idle(&Config::default(), &Origin::Local, false));
     }
 
     #[test]

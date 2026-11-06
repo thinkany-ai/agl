@@ -344,8 +344,9 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
             })
         }
         "daemon.update" => {
-            // Replaces the binary and restarts: as much trust as `exec`.
-            crate::machine::allowed(&mgr.cfg(), origin, "daemon.update")?;
+            // Any link may update agl (only the official release, checked
+            // against its sha256), but only a `full` one may end turns to do it.
+            let if_idle = crate::machine::update_only_if_idle(&mgr.cfg(), origin, params["if_idle"].as_bool().unwrap_or(false));
             let check = crate::update::check().await?;
             // A restart stops every session's turn, but a hub decides only for
             // its own: a turn running elsewhere (another hub, or a local
@@ -353,7 +354,7 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
             let (own, elsewhere) = crate::session::busy_counts(&mgr.list(), origin);
             if !check.update_available {
                 json!({"updated": false, "current": check.current, "latest": check.latest})
-            } else if elsewhere > 0 || (own > 0 && params["if_idle"].as_bool().unwrap_or(false)) {
+            } else if elsewhere > 0 || (own > 0 && if_idle) {
                 // `busy` counts both, as it did before `busy_elsewhere`.
                 json!({"updated": false, "current": check.current, "latest": check.latest, "busy": own + elsewhere, "busy_elsewhere": elsewhere})
             } else {

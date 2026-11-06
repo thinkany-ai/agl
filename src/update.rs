@@ -1,7 +1,7 @@
 //! Updating agl in place: the newest release, checked against its published
 //! sha256 and swapped in for the running binary, then the daemon restarted on
 //! it. `agl update` runs it from the command line; a hub runs it with
-//! `daemon.update` (full-access links only, like `exec`).
+//! `daemon.update` (any link; below `full` it waits until its sessions are idle).
 
 use std::path::PathBuf;
 use std::time::Duration;
