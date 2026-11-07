@@ -4,7 +4,7 @@
 //! requests become permission requests.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -466,13 +466,57 @@ fn map_notification(method: &str, p: &Value, state: &Arc<Mutex<TurnState>>) -> V
 /// `model/list` from a short-lived app-server (no thread is created).
 /// Capabilities from `codex features list` (`<name> <stage> <enabled>` per
 /// line): image generation, the browser and Computer Use when their flags
-/// are on. A flag only says the tool is loaded, not that the OS granted
-/// Screen Recording / Accessibility or that a browser is reachable.
+/// are on. The browser and Computer Use flags are on in every build, but the
+/// tools come from plugins the desktop app installs into CODEX_HOME, so those
+/// two also need an enabled, installed plugin (a CLI-only machine has none).
+/// Neither says the OS granted Screen Recording / Accessibility or that a
+/// browser is reachable.
 pub(crate) async fn capabilities(bin: &Path) -> Vec<String> {
-    match super::run_capture(bin, &["features", "list"], Duration::from_secs(8)).await {
-        Some(out) => parse_capabilities(&out),
-        None => Vec::new(),
+    let Some(out) = super::run_capture(bin, &["features", "list"], Duration::from_secs(8)).await else {
+        return Vec::new();
+    };
+    let plugins = installed_plugins(&codex_home());
+    parse_capabilities(&out).into_iter().filter(|c| plugin_backed(c, &plugins)).collect()
+}
+
+fn codex_home() -> PathBuf {
+    crate::shellenv::var("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".codex"))
+}
+
+/// Whether a capability's tools are loaded: the plugin-backed ones need one
+/// of their plugins.
+fn plugin_backed(cap: &str, plugins: &[String]) -> bool {
+    let needs: &[&str] = match cap {
+        "computer_use" => &["computer-use"],
+        "browser" => &["browser", "chrome"],
+        _ => return true,
+    };
+    needs.iter().any(|n| plugins.iter().any(|p| p == n))
+}
+
+/// Plugins enabled in `config.toml` (`[plugins."<name>@<marketplace>"]` with
+/// `enabled = true`) whose files are in the plugin cache.
+fn installed_plugins(home: &Path) -> Vec<String> {
+    let config = std::fs::read_to_string(home.join("config.toml")).unwrap_or_default();
+    let mut found = Vec::new();
+    let mut current: Option<(String, String)> = None;
+    for line in config.lines().map(str::trim) {
+        if line.starts_with('[') {
+            current = line
+                .strip_prefix("[plugins.\"")
+                .and_then(|r| r.strip_suffix("\"]"))
+                .and_then(|id| id.split_once('@'))
+                .map(|(n, m)| (n.to_string(), m.to_string()));
+            continue;
+        }
+        let Some((name, market)) = &current else { continue };
+        let Some((k, v)) = line.split_once('=') else { continue };
+        let v = v.split('#').next().unwrap_or_default().trim();
+        if k.trim() == "enabled" && v == "true" && home.join("plugins/cache").join(market).join(name).is_dir() && !found.contains(name) {
+            found.push(name.clone());
+        }
     }
+    found
 }
 
 fn parse_capabilities(out: &str) -> Vec<String> {
@@ -554,6 +598,31 @@ standalone_web_search                    under development  false\n";
         let off = "image_generation                         stable             false\nbrowser_use stable false\n";
         assert!(super::parse_capabilities(off).is_empty());
         assert!(super::parse_capabilities("").is_empty());
+    }
+
+    #[test]
+    fn browser_and_computer_use_need_their_plugins() {
+        let home = std::env::temp_dir().join(format!("agl-codex-home-{}", uuid::Uuid::new_v4()));
+        let cache = home.join("plugins/cache/openai-bundled");
+        for p in ["computer-use", "chrome"] {
+            std::fs::create_dir_all(cache.join(p).join("1.0")).unwrap();
+        }
+        // A CLI-only machine: flags on, no plugins.
+        assert!(super::installed_plugins(&home).is_empty());
+        std::fs::write(
+            home.join("config.toml"),
+            "model = \"x\"\n\n[plugins.\"computer-use@openai-bundled\"]\nenabled = true # on\n\n\
+             [plugins.\"chrome@openai-bundled\"]\nenabled = false\n\n\
+             [plugins.\"browser@openai-bundled\"]\nenabled = true\n",
+        )
+        .unwrap();
+        // chrome is disabled, browser is enabled but not installed.
+        let plugins = super::installed_plugins(&home);
+        assert_eq!(plugins, vec!["computer-use"]);
+        let caps: Vec<_> = ["browser", "computer_use", "image_generation"].into_iter().filter(|c| super::plugin_backed(c, &plugins)).collect();
+        assert_eq!(caps, vec!["computer_use", "image_generation"]);
+        assert!(!super::plugin_backed("computer_use", &[]));
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     use super::*;

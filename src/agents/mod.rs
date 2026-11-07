@@ -148,14 +148,46 @@ pub fn find_binary(d: &AgentDef) -> Option<PathBuf> {
         let home = dirs::home_dir().unwrap_or_default();
         for root in [PathBuf::from("/Applications"), home.join("Applications")] {
             for app in ["Codex.app", "ChatGPT.app"] {
-                let p = root.join(app).join("Contents/Resources/codex");
-                if p.is_file() {
+                if let Some(p) = bundled_codex(&root.join(app).join("Contents/Resources")) {
                     return Some(p);
                 }
             }
         }
     }
     None
+}
+
+/// The Codex CLI inside a desktop app's `Contents/Resources`: the
+/// `codex-cli` package (its `codex-package.json` names the entrypoint) in
+/// current apps, a bare `codex` in older ones.
+fn bundled_codex(resources: &Path) -> Option<PathBuf> {
+    let pkg = resources.join("codex-cli");
+    let entry = std::fs::read(pkg.join("codex-package.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v.get("entrypoint")?.as_str().map(String::from))
+        .unwrap_or_else(|| "bin/codex".into());
+    [pkg.join(entry), pkg.join("CodexCLI.app/Contents/MacOS/codex"), resources.join("codex")]
+        .into_iter()
+        .find(|p| p.is_file())
+}
+
+/// Directories a bundled agent expects on its PATH (the app's `codex-path`,
+/// which holds the `rg` Codex searches with).
+fn bundled_path_dirs(bin: &Path) -> Vec<PathBuf> {
+    bin.ancestors()
+        .find(|a| a.join("codex-package.json").is_file())
+        .map(|pkg| {
+            let dir = std::fs::read(pkg.join("codex-package.json"))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                .and_then(|v| v.get("pathDir")?.as_str().map(String::from))
+                .unwrap_or_else(|| "codex-path".into());
+            pkg.join(dir)
+        })
+        .filter(|d| d.is_dir())
+        .into_iter()
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -488,6 +520,13 @@ where
 pub(crate) fn base_command(bin: &std::path::Path, spec: &SpawnSpec) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(bin);
     shellenv::apply(&mut cmd);
+    let extra = bundled_path_dirs(bin);
+    if !extra.is_empty() {
+        let path = std::env::join_paths(extra.into_iter().chain(std::env::split_paths(&shellenv::path_var())));
+        if let Ok(path) = path {
+            cmd.env("PATH", path);
+        }
+    }
     // A daemon started from inside Claude Code inherits its session markers.
     for (k, _) in std::env::vars() {
         if k == "CLAUDECODE" || k == "CLAUDE_PID" || k.starts_with("CLAUDE_CODE_") && k != "CLAUDE_CODE_OAUTH_TOKEN" {
@@ -930,6 +969,26 @@ mod reap_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn finds_the_codex_cli_package_inside_a_desktop_app() {
+        use std::os::unix::fs::PermissionsExt;
+        let res = std::env::temp_dir().join(format!("agl-bundle-{}", uuid::Uuid::new_v4()));
+        let pkg = res.join("codex-cli");
+        std::fs::create_dir_all(&res).unwrap();
+        assert_eq!(bundled_codex(&res), None);
+        std::fs::create_dir_all(pkg.join("bin")).unwrap();
+        std::fs::create_dir_all(pkg.join("codex-path")).unwrap();
+        let entry = pkg.join("bin/codex");
+        std::fs::write(&entry, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(pkg.join("codex-package.json"), r#"{"entrypoint":"bin/codex","pathDir":"codex-path"}"#).unwrap();
+        assert_eq!(bundled_codex(&res), Some(entry.clone()));
+        assert_eq!(bundled_path_dirs(&entry), vec![pkg.join("codex-path")]);
+        assert!(bundled_path_dirs(Path::new("/usr/bin/true")).is_empty());
+        std::fs::remove_dir_all(res).unwrap();
+    }
 
     #[test]
     fn mcp_tool_result_splits_text_and_images() {

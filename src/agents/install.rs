@@ -50,7 +50,7 @@ fn meta(id: &str) -> Meta {
             ..Meta::default()
         },
         "codex" => Meta {
-            apps: &["Codex.app"],
+            apps: &["Codex.app", "ChatGPT.app"],
             package: Some("@openai/codex"),
             guide: Some("https://github.com/openai/codex"),
             latest: Some(Npm),
