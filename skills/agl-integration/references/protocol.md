@@ -197,7 +197,8 @@ never sees `extra_args` or `instructions`).
 
 From agl 0.3.12, a **local** client can tune how a session's agent is
 launched. These fields are never accepted from a hub link: a hub request
-carrying any of them (even `false` or empty) fails with
+that sets any of them (a non-empty `extra_args`, a non-blank `instructions`,
+`ephemeral: true`, or a value of another type) fails with
 `` `<field>` is accepted from local connections only (`extra_args`, `instructions`, `ephemeral`) ``.
 They are stored with the session (in `sessions.json`, 0600) and used every
 time its process starts, including after suspension or a daemon restart.

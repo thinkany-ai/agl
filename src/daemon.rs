@@ -410,7 +410,10 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
         }
         "session.create" => {
             if !local {
-                if let Some(k) = LOCAL_ONLY_CREATE_FIELDS.iter().find(|k| !params[**k].is_null()) {
+                // Defaults (null, false, [], "") are what a generic client
+                // sends for "not set": only a value that would change the
+                // launch is refused.
+                if let Some(k) = LOCAL_ONLY_CREATE_FIELDS.iter().find(|k| launch_setting_in_effect(&params[**k])) {
                     return Err(anyhow!("`{k}` is accepted from local connections only (`extra_args`, `instructions`, `ephemeral`)"));
                 }
             }
@@ -461,4 +464,15 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
         "fs.read" | "fs.write" | "exec" => crate::machine::dispatch(&mgr.cfg(), origin, method, params).await?,
         other => return Err(anyhow!("unknown method `{other}`")),
     })
+}
+
+/// Whether a `session.create` launch-setting field would change how the agent
+/// is launched. Unexpected types count as set, so they are refused too.
+fn launch_setting_in_effect(v: &Value) -> bool {
+    match v {
+        Value::Null | Value::Bool(false) => false,
+        Value::Array(a) => !a.is_empty(),
+        Value::String(t) => !t.trim().is_empty(),
+        _ => true,
+    }
 }

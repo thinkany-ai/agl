@@ -90,12 +90,17 @@ async fn dispatcher() {
 
     // --- Launch settings are for local connections only --------------------
     let cwd = std::env::temp_dir();
-    for field in [json!({"extra_args": ["--x"]}), json!({"instructions": "be brief"}), json!({"ephemeral": false})] {
+    for field in [json!({"extra_args": ["--x"]}), json!({"instructions": "be brief"}), json!({"ephemeral": true}), json!({"ephemeral": "yes"})] {
         let mut p = json!({"agent": "claude", "cwd": cwd});
         p.as_object_mut().unwrap().extend(field.as_object().unwrap().clone());
         let err = call(&d, "session.create", p, &hub()).await.unwrap_err();
         assert!(err.contains("accepted from local connections only"), "{field}: {err}");
     }
+    // Defaults that generic clients send for "not set" are not refused.
+    let p = json!({"agent": "claude", "cwd": cwd, "extra_args": [], "instructions": " ", "ephemeral": false, "name": "hub-defaults"});
+    let from_hub = call(&d, "session.create", p, &hub()).await.unwrap();
+    assert_eq!(from_hub["name"], "hub-defaults");
+    call(&d, "session.close", json!({"session_id": "hub-defaults"}), &hub()).await.unwrap();
     let p = json!({"agent": "claude", "cwd": cwd, "extra_args": ["--x"], "instructions": "be brief", "ephemeral": true, "name": "tuned"});
     let created = call(&d, "session.create", p, &local).await.unwrap();
     assert_eq!((created["extra_args"].clone(), created["instructions"].clone(), created["ephemeral"].clone()), (json!(["--x"]), json!("be brief"), json!(true)));
