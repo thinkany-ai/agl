@@ -118,7 +118,7 @@ Other files in `~/.agl/`:
 |---|---|
 | `daemon.json` | Port and local token (mode 0600) |
 | `sessions.json` | Session list |
-| `history/` | Per-session event history |
+| `history/` | Per-session event history (not for sessions created with `history: false`) |
 | `daemon.log` | Daemon log |
 
 ## Repository layout

@@ -82,6 +82,18 @@ pub struct SessionMeta {
     /// visible to any hub link, whatever `share_local` says.
     #[serde(default = "shared_visibility")]
     pub visibility: String,
+    /// Whether the session's events are written to `$AGL_HOME/history`.
+    /// When false they are kept in memory only, for the daemon's lifetime.
+    #[serde(default = "yes")]
+    pub history: bool,
+    /// `seq` of the session's newest event, so numbering continues after a
+    /// restart even when no history was written.
+    #[serde(default)]
+    pub last_seq: u64,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn default_access() -> String {
@@ -147,6 +159,15 @@ struct Shared {
     seq: AtomicU64,
 }
 
+impl Shared {
+    /// The session's metadata as callers see it.
+    fn snapshot(&self) -> SessionMeta {
+        let mut m = self.meta.lock().unwrap().clone();
+        m.last_seq = self.seq.load(Ordering::SeqCst);
+        m
+    }
+}
+
 struct Handle {
     shared: Arc<Shared>,
     tx: mpsc::UnboundedSender<Cmd>,
@@ -190,6 +211,10 @@ pub struct CreateParams {
     /// shared (default) | local: a `local` session is never visible to a hub.
     #[serde(default)]
     pub visibility: Option<String>,
+    /// false: keep the session's events in memory only, never in
+    /// `$AGL_HOME/history` (default true).
+    #[serde(default)]
+    pub history: Option<bool>,
     /// Set by the dispatcher, never by the caller.
     #[serde(skip)]
     pub origin: Option<Origin>,
@@ -239,16 +264,16 @@ impl Manager {
             m.live = false;
             m.queued = 0;
             m.pending_approvals = 0;
-            let history = load_history(&m.id);
+            let history = if m.history { load_history(&m.id) } else { VecDeque::new() };
+            let last = history.back().map(|e| e.seq).unwrap_or(0).max(m.last_seq);
             let shared = self.start_actor(m);
-            let last = history.back().map(|e| e.seq).unwrap_or(0);
             shared.seq.store(last, Ordering::SeqCst);
             *shared.history.lock().unwrap() = history;
         }
     }
 
     fn persist(&self) {
-        let metas: Vec<SessionMeta> = self.sessions.lock().unwrap().values().map(|h| h.shared.meta.lock().unwrap().clone()).collect();
+        let metas: Vec<SessionMeta> = self.sessions.lock().unwrap().values().map(|h| h.shared.snapshot()).collect();
         let _ = std::fs::create_dir_all(config::home());
         let _ = config::write_private(&config::sessions_path(), serde_json::to_string_pretty(&metas).unwrap_or_default().as_bytes());
     }
@@ -372,6 +397,8 @@ impl Manager {
             use_login: false,
             origin: origin.tag(),
             visibility,
+            history: p.history.unwrap_or(true),
+            last_seq: 0,
         };
         let shared = self.start_actor(meta.clone());
         if p.warm {
@@ -475,12 +502,11 @@ impl Manager {
 
     pub fn get(&self, key: &str) -> Result<SessionMeta> {
         let (_, shared, _) = self.handle(key)?;
-        let m = shared.meta.lock().unwrap().clone();
-        Ok(m)
+        Ok(shared.snapshot())
     }
 
     pub fn list(&self) -> Vec<SessionMeta> {
-        let mut v: Vec<SessionMeta> = self.sessions.lock().unwrap().values().map(|h| h.shared.meta.lock().unwrap().clone()).collect();
+        let mut v: Vec<SessionMeta> = self.sessions.lock().unwrap().values().map(|h| h.shared.snapshot()).collect();
         v.sort_by_key(|m| std::cmp::Reverse(m.last_active_at));
         v
     }
@@ -546,6 +572,8 @@ impl Manager {
             }
         });
         futures_util::future::join_all(waits).await;
+        // Keeps `last_seq` (and the rest) current for the next daemon.
+        self.persist();
     }
 
     pub fn live_count(&self) -> usize {
@@ -645,7 +673,13 @@ fn history_path(id: &str) -> PathBuf {
 }
 
 fn save_history(shared: &Shared) {
-    let id = shared.meta.lock().unwrap().id.clone();
+    let (id, keep) = {
+        let m = shared.meta.lock().unwrap();
+        (m.id.clone(), m.history)
+    };
+    if !keep {
+        return;
+    }
     let data = {
         let h = shared.history.lock().unwrap();
         serde_json::to_vec(&*h).unwrap_or_default()

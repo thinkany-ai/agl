@@ -233,6 +233,28 @@ async fn sessions_end_to_end() {
     // --- Persistence ----------------------------------------------------------
     let history = mgr.history(&r, 0, None).unwrap();
     assert!(history.iter().any(|e| matches!(&e.event, AgentEvent::TextDelta { text, .. } if text == "banana")));
+    let history_file = |id: &str| agl::config::history_dir().join(format!("{id}.json"));
+    assert!(history_file(&r).is_file());
 
+    // history: false keeps events in memory only.
+    let p = CreateParams { agent: "mock".into(), history: Some(false), ..Default::default() };
+    let nh = mgr.create(p).unwrap().id;
+    let t = turn(&mgr, &mut rx, &nh, "secret", "queue", None).await;
+    assert_eq!(t.text, "echo: secret");
+    assert!(mgr.history(&nh, 0, None).unwrap().iter().any(|e| matches!(&e.event, AgentEvent::UserMessage { .. })), "in memory");
+    assert!(!history_file(&nh).exists(), "never written to disk");
+    assert!(!std::fs::read_to_string(agl::config::sessions_path()).unwrap().contains("secret"), "prompts are not in sessions.json");
+    let last_seq = mgr.get(&nh).unwrap().last_seq;
+    assert!(last_seq > 0);
+
+    // After a restart: no history, but numbering goes on.
+    mgr.shutdown_all().await;
+    let mgr = Manager::new(mgr.cfg());
+    mgr.load();
+    let meta = mgr.get(&nh).unwrap();
+    assert!(!meta.history);
+    assert!(mgr.history(&nh, 0, None).unwrap().is_empty());
+    assert!(meta.last_seq >= last_seq, "seq continues after a restart");
+    assert!(!mgr.history(&r, 0, None).unwrap().is_empty(), "persisted history is back");
     mgr.shutdown_all().await;
 }

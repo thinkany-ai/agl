@@ -115,7 +115,7 @@ Hub 的二进制分发：Hub 从 `--dist <dir>` 目录提供 `agl-<os>-<arch>` �
 |---|---|
 | `daemon.json` | 端口和本地 token，权限 0600 |
 | `sessions.json` | 会话列表 |
-| `history/` | 每个会话的事件历史 |
+| `history/` | 每个会话的事件历史（以 `history: false` 创建的会话不写入） |
 | `daemon.log` | daemon 日志 |
 
 ## 仓库结构

@@ -128,13 +128,14 @@ vanish for its own creator; `"shared"` (the default) is accepted.
 | `agents.models` | `{agent}` | `{agent, models: [{id, name, description?, default?, efforts?[]}]}`. Never starts a conversation the user would see. |
 | `daemon.status` | – | Version, protocol, pid, port, `hubs: [{url, status, access, share_local}]` (a hub sees only its own entry), visible sessions, `busy` (sessions with a turn running or queued, from agl 0.3.2), `managed` (started by the autostart service, which restarts it; from 0.3.8), live processes, defaults |
 | `daemon.update` | `{if_idle?}` | From agl 0.3.2. Updates agl to the newest release (checked against its sha256) and restarts the daemon on it: `{updated, current, latest, busy?, busy_elsewhere?}`. With `if_idle`, nothing happens while a session runs a turn (`busy`). A restart ends running turns, so a hub never ends another's: while a session the hub did not create (another hub's, or a local one) runs a turn, nothing happens even without `if_idle` (`busy_elsewhere`, also counted in `busy`). Any hub link may call it (from agl 0.3.5; before, `full` only): it installs only the official release, never a binary the hub picks. Below `full`, the update always behaves as `if_idle`; the link comes back by itself. The new daemon is started by the autostart service when it runs this daemon, otherwise by agl itself (before 0.3.8 an installed but idle service unit made agl skip that, and the daemon stayed down). Under launchd agl also kickstarts the job, since launchd may defer a KeepAlive respawn, and even a RunAtLoad start after `agl service install`, indefinitely (0.3.9 / 0.3.10). An agl inside an app bundle is updated with the app instead. |
-| `session.create` | `{agent, cwd?, model?, effort?, access?, name?, resume?, warm?, visibility?}` | `SessionMeta`. Details: |
+| `session.create` | `{agent, cwd?, model?, effort?, access?, name?, resume?, warm?, visibility?, history?}` | `SessionMeta`. Details: |
 | | | `name`: if a session with that name exists (and is visible to the caller), it is reused. |
 | | | `access`: when omitted, the config's `default_access` for local callers, the link's `access` (default `ask`) for a hub. |
 | | | `resume`: attaches a native id. |
 | | | `warm`: starts the process now (only takes a free slot). |
 | | | `cwd` defaults to the home directory, and `~/` is expanded. |
 | | | `visibility` (0.3.12): `shared` (default) or `local`, which hides the session from every hub link; see [Visibility](#visibility-one-machine-several-hubs). Local clients only. |
+| | | `history` (0.3.12): `false` keeps the session's events out of `$AGL_HOME/history`; see [History](#history). Default `true`. |
 | `session.prompt` | `{session_id, text, mode?, turn_id?}` | `{session_id, turn_id}`, returned as soon as the prompt is accepted. `mode`: |
 | | | `queue` (default): run after the current turn. |
 | | | `steer`: inject into the running turn (claude, codex); otherwise falls back to queue. |
@@ -145,7 +146,7 @@ vanish for its own creator; `"shared"` (the default) is accepted.
 | `session.warm` | `{session_id}` | Pre-starts the agent process. |
 | `session.configure` | `{session_id, model?, effort?, access?, name?}` | `SessionMeta`. Changing model, effort or access restarts the process before the next turn and resumes the conversation natively, so context is kept. |
 | `session.get` / `session.list` | `{session_id}` / – | `SessionMeta` / `SessionMeta[]`, most recent first |
-| `session.history` | `{session_id, after_seq?, limit?}` | `EventEnvelope[]`. Consecutive `text_delta` events are merged. History is persisted, so it survives a daemon restart. |
+| `session.history` | `{session_id, after_seq?, limit?}` | `EventEnvelope[]`. Consecutive `text_delta` events are merged. History is persisted, so it survives a daemon restart, unless the session was created with `history: false` ([History](#history)). |
 | `session.close` | `{session_id}` | Kills the process and deletes the session. |
 | `fs.read` | `{path}` | `{content_base64, size}`. `path` is absolute or `~/…`; up to 100 MB. |
 | `fs.write` | `{path, content_base64}` | `{size}`. Creates parent directories and replaces the file atomically. |
@@ -176,7 +177,7 @@ Hub-level methods take no `machine_id`:
   "model": "haiku", "current_model": "claude-haiku-5-5", "effort": null, "access": "ask",
   "native_id": "6f0c…", "origin": "local", "visibility": "shared",
   "status": "idle", "created_at": 1792559001027, "last_active_at": 1792559009456,
-  "turns": 3, "queued": 0, "live": true, "pending_approvals": 0,
+  "turns": 3, "queued": 0, "live": true, "pending_approvals": 0, "history": true, "last_seq": 42,
   "features": ["warm", "approvals", "steer", "interrupt", "models", "effort"]
 }
 ```
@@ -184,7 +185,29 @@ Hub-level methods take no `machine_id`:
 `model` is what was asked for (null = the agent's default); `current_model`
 is what the runtime reported running. `origin` is `local` or a hub URL.
 `visibility` is `shared` or `local` (from 0.3.12; absent before, read it as
-`shared`).
+`shared`). `history` is whether events are written to disk, and `last_seq` the
+`seq` of the session's newest event (both from 0.3.12).
+
+## History
+
+Every event except `heartbeat` is kept per session, up to `history_limit`
+events (consecutive `text_delta`s merged), for `session.history`. By default
+the history is also written to `$AGL_HOME/history/<id>.json` (0600) at the end
+of every turn and when the daemon stops, so it survives a restart.
+
+A session created with `history: false` (from 0.3.12):
+- has nothing written to `$AGL_HOME/history`, ever;
+- still streams every event live, and keeps the same in-memory history while
+  the daemon runs: `session.history` answers from it as usual;
+- after a daemon restart (or for an embedding app, a new `Manager`), starts
+  with an empty history: `session.history` returns `[]` until new events
+  arrive. `seq` numbering continues where it was (`last_seq` is kept in
+  `sessions.json`), so a client's `after_seq` stays valid.
+
+`sessions.json` holds session metadata only (`SessionMeta`), never prompts
+or replies, for every session. Prompts and replies live only in the history,
+and in the agent's own conversation store (`~/.claude`, `~/.codex`, …), which
+agl does not manage.
 
 `status` values:
 
@@ -230,7 +253,7 @@ user_message → [queued] → [status starting] → turn_started → status runn
 Rules for clients:
 - Group events by `session_id`. Only one turn runs per session, so every event
   between `turn_started` and `turn_ended` belongs to that turn.
-- `seq` increases monotonically per session and is persisted with history. To
+- `seq` increases monotonically per session and survives restarts. To
   reconnect without losing events, call `session.history {after_seq: lastSeen}`
   and then resume handling live events.
 - Do not treat `text_delta` as final until `turn_ended`. On `aborted`, the text
