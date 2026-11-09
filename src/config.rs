@@ -53,6 +53,9 @@ pub struct Config {
     /// Extra agents, e.g. any ACP-speaking CLI:
     /// `{"id":"goose","command":"goose","args":["acp"],"protocol":"acp"}`
     pub custom_agents: Vec<CustomAgent>,
+    /// Directories searched for agent executables before the login shell's
+    /// PATH, and put first on the PATH agents run with (absolute or `~/…`).
+    pub extra_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +148,7 @@ impl Default for Config {
             history_limit: 2000,
             history_image_limit: 16,
             custom_agents: Vec::new(),
+            extra_paths: Vec::new(),
         }
     }
 }

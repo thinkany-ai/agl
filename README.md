@@ -109,6 +109,7 @@ Settings live in `~/.agl/config.json`. All fields are listed in [protocol.md](sk
 
 ```json
 { "default_access": "full", "max_live": 8, "idle_timeout_secs": 600, "approval_timeout_secs": 600,
+  "extra_paths": ["~/my-tools/bin"],
   "custom_agents": [{ "id": "goose", "command": "goose", "args": ["acp"], "protocol": "acp" }] }
 ```
 

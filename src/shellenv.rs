@@ -5,11 +5,14 @@
 //! would not be found or would run unauthenticated. We ask the user's login
 //! shell once (interactive first: `-lc` skips `.zshrc`) and merge its PATH
 //! and an allowlist of credential variables into what children get.
+//!
+//! The config's `extra_paths` go in front of all of that. `reload` asks the
+//! login shell again, e.g. after an app installed a CLI.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 const MARKER: &str = "__agl_env__";
@@ -43,7 +46,12 @@ struct ShellEnv {
     vars: HashMap<String, String>,
 }
 
-static ENV: OnceLock<ShellEnv> = OnceLock::new();
+/// The resolved environment; None until first needed or after `reload`.
+static ENV: RwLock<Option<Arc<ShellEnv>>> = RwLock::new(None);
+/// Serializes resolving, so concurrent first uses ask the shell once.
+static RESOLVING: Mutex<()> = Mutex::new(());
+/// `extra_paths` from the config, searched before everything else.
+static EXTRA_PATHS: RwLock<Vec<PathBuf>> = RwLock::new(Vec::new());
 
 fn login_shell_env() -> Option<HashMap<String, String>> {
     if cfg!(windows) || std::env::var_os("AGL_NO_LOGIN_SHELL").is_some() {
@@ -134,38 +142,49 @@ fn extra_dirs() -> Vec<PathBuf> {
     v
 }
 
-fn get() -> &'static ShellEnv {
-    ENV.get_or_init(|| {
-        let login = login_shell_env();
-        let mut path: Vec<PathBuf> = Vec::new();
-        let mut push = |p: PathBuf| {
-            if !p.as_os_str().is_empty() && !path.contains(&p) {
-                path.push(p);
-            }
-        };
-        if let Some(l) = &login {
-            for p in std::env::split_paths(l.get("PATH").map(String::as_str).unwrap_or("")) {
-                push(p);
-            }
+fn get() -> Arc<ShellEnv> {
+    if let Some(env) = ENV.read().unwrap().clone() {
+        return env;
+    }
+    let _guard = RESOLVING.lock().unwrap();
+    if let Some(env) = ENV.read().unwrap().clone() {
+        return env;
+    }
+    let env = Arc::new(resolve());
+    *ENV.write().unwrap() = Some(env.clone());
+    env
+}
+
+fn resolve() -> ShellEnv {
+    let login = login_shell_env();
+    let mut path: Vec<PathBuf> = Vec::new();
+    let mut push = |p: PathBuf| {
+        if !p.as_os_str().is_empty() && !path.contains(&p) {
+            path.push(p);
         }
-        if let Some(p) = std::env::var_os("PATH") {
-            for p in std::env::split_paths(&p) {
-                push(p);
-            }
-        }
-        for p in extra_dirs() {
+    };
+    if let Some(l) = &login {
+        for p in std::env::split_paths(l.get("PATH").map(String::as_str).unwrap_or("")) {
             push(p);
         }
-        let mut vars = HashMap::new();
-        if let Some(l) = login {
-            for (k, v) in l {
-                if IMPORT_PREFIXES.iter().any(|p| k.starts_with(p)) && std::env::var_os(&k).is_none() {
-                    vars.insert(k, v);
-                }
+    }
+    if let Some(p) = std::env::var_os("PATH") {
+        for p in std::env::split_paths(&p) {
+            push(p);
+        }
+    }
+    for p in extra_dirs() {
+        push(p);
+    }
+    let mut vars = HashMap::new();
+    if let Some(l) = login {
+        for (k, v) in l {
+            if IMPORT_PREFIXES.iter().any(|p| k.starts_with(p)) && std::env::var_os(&k).is_none() {
+                vars.insert(k, v);
             }
         }
-        ShellEnv { path, vars }
-    })
+    }
+    ShellEnv { path, vars }
 }
 
 /// Resolve the login-shell environment now (it takes up to a few seconds).
@@ -173,9 +192,48 @@ pub fn warm_up() {
     let _ = get();
 }
 
+/// Ask the login shell again (blocking, up to a few seconds), so a CLI
+/// installed since the daemon started is found. Callers keep the old
+/// environment until the new one is ready.
+pub fn reload() {
+    let _guard = RESOLVING.lock().unwrap();
+    let env = Arc::new(resolve());
+    *ENV.write().unwrap() = Some(env);
+}
+
+/// Set the config's `extra_paths`: directories searched for agents (and put
+/// on their PATH) before anything else. `~/` is expanded; relative and empty
+/// entries are ignored.
+pub fn set_extra_paths(paths: &[String]) {
+    let home = dirs::home_dir();
+    let dirs: Vec<PathBuf> = paths
+        .iter()
+        .map(|p| p.trim())
+        .filter_map(|p| match (p.strip_prefix("~/"), &home) {
+            (Some(rest), Some(h)) => Some(h.join(rest)),
+            _ if p == "~" => home.clone(),
+            _ => Some(PathBuf::from(p)),
+        })
+        .filter(|p| p.is_absolute())
+        .collect();
+    *EXTRA_PATHS.write().unwrap() = dirs;
+}
+
+/// The directories searched, in order: `extra_paths`, the login shell's PATH,
+/// this process's PATH, then common install directories.
+pub fn path_entries() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for p in EXTRA_PATHS.read().unwrap().iter().chain(get().path.iter()) {
+        if !out.contains(p) {
+            out.push(p.clone());
+        }
+    }
+    out
+}
+
 /// PATH to give children.
 pub fn path_var() -> std::ffi::OsString {
-    std::env::join_paths(&get().path).unwrap_or_default()
+    std::env::join_paths(path_entries()).unwrap_or_default()
 }
 
 /// Apply the agent environment to a command.
@@ -203,7 +261,7 @@ pub fn which(name: &str) -> Option<PathBuf> {
         let p = PathBuf::from(name);
         return runnable(&p).then_some(p);
     }
-    get().path.iter().map(|d| d.join(name)).find(|p| runnable(p))
+    path_entries().iter().map(|d| d.join(name)).find(|p| runnable(p))
 }
 
 fn runnable(p: &Path) -> bool {
@@ -231,5 +289,36 @@ fn runnable(p: &Path) -> bool {
     #[cfg(not(unix))]
     {
         p.is_file()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn extra_paths_are_searched_first_and_survive_a_reload() {
+        use std::os::unix::fs::PermissionsExt;
+        std::env::set_var("AGL_NO_LOGIN_SHELL", "1");
+        let dir = std::env::temp_dir().join(format!("agl-extra-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("agl-extra-probe");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(which("agl-extra-probe"), None);
+
+        set_extra_paths(&[dir.display().to_string(), "relative/bin".into(), " ".into()]);
+        assert_eq!(path_entries()[0], dir);
+        assert!(!path_entries().iter().any(|p| p.ends_with("relative/bin")), "relative entries are ignored");
+        assert_eq!(which("agl-extra-probe"), Some(bin.clone()));
+        assert!(path_var().to_string_lossy().starts_with(&dir.display().to_string()));
+        reload();
+        assert_eq!(which("agl-extra-probe"), Some(bin), "a reload keeps extra_paths");
+
+        set_extra_paths(&["~/agl-extra-home".into()]);
+        assert_eq!(path_entries()[0], dirs::home_dir().unwrap().join("agl-extra-home"));
+        set_extra_paths(&[]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

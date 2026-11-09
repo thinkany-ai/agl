@@ -377,9 +377,20 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
         }
         "hub.reload" if local => {
             let fresh = Config::load()?;
+            crate::shellenv::set_extra_paths(&fresh.extra_paths);
             *mgr.cfg.write().unwrap() = fresh;
             d.reload.send_modify(|g| *g += 1);
             json!({"ok": true})
+        }
+        "env.reload" if local => {
+            // Re-read config.json (extra_paths, custom_agents, …) and the
+            // login shell, so a CLI installed since the daemon started is found.
+            let fresh = Config::load()?;
+            crate::shellenv::set_extra_paths(&fresh.extra_paths);
+            *mgr.cfg.write().unwrap() = fresh;
+            d.reload.send_modify(|g| *g += 1);
+            tokio::task::spawn_blocking(crate::shellenv::reload).await?;
+            json!({"ok": true, "path": crate::shellenv::path_entries()})
         }
         "session.create" => {
             let mut p: CreateParams = serde_json::from_value(params).context("session.create params")?;

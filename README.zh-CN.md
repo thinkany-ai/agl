@@ -106,6 +106,7 @@ Hub 的二进制分发：Hub 从 `--dist <dir>` 目录提供 `agl-<os>-<arch>` �
 
 ```json
 { "default_access": "full", "max_live": 8, "idle_timeout_secs": 600, "approval_timeout_secs": 600,
+  "extra_paths": ["~/my-tools/bin"],
   "custom_agents": [{ "id": "goose", "command": "goose", "args": ["acp"], "protocol": "acp" }] }
 ```
 

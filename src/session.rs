@@ -234,6 +234,7 @@ pub struct ConfigureParams {
 
 impl Manager {
     pub fn new(cfg: Config) -> Arc<Manager> {
+        shellenv::set_extra_paths(&cfg.extra_paths);
         let (bus, _) = broadcast::channel(16384);
         let budget = Arc::new(Semaphore::new(cfg.max_live.max(1)));
         let use_login = std::fs::read_to_string(config::home().join("state.json"))

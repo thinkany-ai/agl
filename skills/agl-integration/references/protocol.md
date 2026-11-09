@@ -116,6 +116,7 @@ vanish for its own creator; `"shared"` (the default) is accepted.
 | `subscribe` / `unsubscribe` | `{session_id}` or `{all: true}` | Start or stop receiving that session's events. `session.prompt` subscribes you automatically. |
 | `daemon.shutdown` | – | Stops the daemon and every agent process. |
 | `hub.reload` | – | Re-reads `config.json` and reconciles the hub links. |
+| `env.reload` | – | From agl 0.3.12. Re-reads `config.json` (like `hub.reload`, including `extra_paths` and `custom_agents`) and asks the login shell for its environment again, without a restart: `{ok, path}`, `path` being the directories now searched, in order. Call it after installing an agent CLI (or changing `extra_paths`) so `agents.list` and new sessions find it. Takes up to a few seconds; running agents keep their environment. |
 | `gc.run` | `{idle?}` | `{suspended[], removed[]}` |
 
 ## Methods
@@ -320,7 +321,7 @@ How to use this in a product: [discovery.md](discovery.md).
 
 | field | meaning |
 |---|---|
-| `available`, `path`, `version` | The executable agl runs (login-shell PATH; `AGL_<ID>_BIN` overrides) and the first line of `--version` |
+| `available`, `path`, `version` | The executable agl runs (`extra_paths`, then the login-shell PATH; `AGL_<ID>_BIN` overrides) and the first line of `--version` |
 | `status` | `ready`, `desktop-only` (no CLI, but its macOS desktop app is installed), `not-found` |
 | `desktop_app` | The desktop app that ships the agent, e.g. `/Applications/Cursor.app` |
 | `install.source` | How the found binary was installed: `npm` (with `package`, `prefix`), `bun`, `brew`, `native` (self-updating install), `app-bundle` (the Codex inside Codex.app/ChatGPT.app, updated with the app; from 0.3.11 also the `Contents/Resources/codex-cli` layout of current apps), `unknown` |
@@ -340,12 +341,20 @@ Custom agents carry no `install` or update fields. Detection only reads; nothing
   "approval_timeout_secs": 600, "stall_timeout_secs": 120, "turn_timeout_secs": 0,
   "tool_output_limit": 16384, "history_limit": 2000, "history_image_limit": 16,
   "custom_agents": [{"id": "goose", "command": "goose", "args": ["acp"], "protocol": "acp"}],
+  "extra_paths": ["~/Library/Application Support/MyApp/bin"],
   "hubs": [{"url": "https://app.example.com/agl", "token": "aglm_…", "access": "ask", "share_local": true}]
 }
 ```
 
 `hubs` is written by `agl connect` / `agl disconnect`; the single
 `hub_url` / `hub_token` fields of agl ≤0.1 are migrated into it on load.
+
+`extra_paths` (from 0.3.12): directories searched for agent executables
+before everything else, and put first on the PATH agents, `exec` and
+`--version` probes run with. Entries are absolute or `~/…`; others are
+ignored. The search order is `AGL_<ID>_BIN`, then `extra_paths`, the login
+shell's PATH, the daemon's own PATH, and common install directories. The
+daemon reads it at start, on `hub.reload` and on `env.reload`.
 
 Environment variables:
 

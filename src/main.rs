@@ -237,6 +237,7 @@ async fn main() {
 async fn real_main() -> Result<()> {
     let cli = Cli::parse();
     let mut cfg = Config::load()?;
+    agl::shellenv::set_extra_paths(&cfg.extra_paths);
     match cli.cmd {
         Cmd::Daemon { port, parent_pid, token } => daemon::run(cfg, daemon::DaemonOptions { port, parent_pid, token }).await,
         Cmd::Hub { listen, public_url, token, dist, release_url, max_body } => hub::run(listen, public_url, token, dist, Some(release_url), max_body).await,

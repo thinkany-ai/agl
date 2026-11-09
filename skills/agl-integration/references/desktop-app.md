@@ -42,7 +42,11 @@ Why these flags:
 
 Things you do **not** need to do:
 - Resolve PATH. agl reads the login shell's PATH and API keys, plus ~25 common
-  install dirs and nvm.
+  install dirs and nvm. If your app installs agent CLIs somewhere of its own,
+  add that directory to `extra_paths` in `$AGL_HOME/config.json`, and after
+  installing one call `env.reload` so `agents.list` shows it without a
+  daemon restart (this also picks up PATH changes the installer made to the
+  user's shell profile).
 - Clean up orphans. agl kills agent process trees left by a crashed predecessor
   at the next start, after checking a process fingerprint first.
 
