@@ -306,8 +306,23 @@ async fn sessions_end_to_end() {
     let last_seq = mgr.get(&nh).unwrap().last_seq;
     assert!(last_seq > 0);
 
+    // A turn running when the daemon stops still gets its turn_ended.
+    let running = mgr.prompt(&r, "SLOW".into(), None, None).unwrap()["turn_id"].as_str().unwrap().to_string();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !matches!(rx.recv().await.unwrap().event, AgentEvent::TextDelta { .. }) {}
+    })
+    .await
+    .unwrap();
+
     // After a restart: no history, but numbering goes on.
     mgr.shutdown_all().await;
+    let ended = |mgr: &Arc<Manager>| {
+        mgr.history(&r, 0, None).unwrap().into_iter().find_map(|e| match e.event {
+            AgentEvent::TurnEnded { turn_id, outcome, error, .. } if turn_id == running => Some((outcome, error.unwrap_or_default())),
+            _ => None,
+        })
+    };
+    assert_eq!(ended(&mgr), Some(("aborted".into(), "the agl daemon stopped".into())));
     let mgr = Manager::new(mgr.cfg());
     mgr.load();
     let meta = mgr.get(&nh).unwrap();
@@ -315,5 +330,6 @@ async fn sessions_end_to_end() {
     assert!(mgr.history(&nh, 0, None).unwrap().is_empty());
     assert!(meta.last_seq >= last_seq, "seq continues after a restart");
     assert!(!mgr.history(&r, 0, None).unwrap().is_empty(), "persisted history is back");
+    assert_eq!(ended(&mgr).unwrap().0, "aborted", "and it says how the turn ended");
     mgr.shutdown_all().await;
 }

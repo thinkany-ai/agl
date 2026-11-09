@@ -169,7 +169,8 @@ enum Cmd {
     Warm,
     Approve { request_id: String, decision: Decision, done: oneshot::Sender<Result<()>> },
     Reconfigure,
-    Close(oneshot::Sender<()>),
+    /// `shutdown`: the daemon is stopping (keep the history), not `session.close`.
+    Close { done: oneshot::Sender<()>, shutdown: bool },
 }
 
 struct Shared {
@@ -297,9 +298,18 @@ impl Manager {
             m.pending_approvals = 0;
             let history = if m.history { load_history(&m.id) } else { VecDeque::new() };
             let last = history.back().map(|e| e.seq).unwrap_or(0).max(m.last_seq);
+            let unfinished = unfinished_turns(&history);
             let shared = self.start_actor(m);
             shared.seq.store(last, Ordering::SeqCst);
             *shared.history.lock().unwrap() = history;
+            // The previous daemon died without ending these turns.
+            for turn_id in &unfinished {
+                let error = Some("the agl daemon stopped during this turn".into());
+                self.emit(&shared, AgentEvent::TurnEnded { turn_id: turn_id.clone(), outcome: "aborted".into(), error, usage: None, timing: None, text: None });
+            }
+            if !unfinished.is_empty() {
+                save_history(&shared);
+            }
         }
     }
 
@@ -533,7 +543,7 @@ impl Manager {
     pub async fn close(&self, key: &str) -> Result<()> {
         let (id, _, tx) = self.handle(key)?;
         let (done, wait) = oneshot::channel();
-        if tx.send(Cmd::Close(done)).is_ok() {
+        if tx.send(Cmd::Close { done, shutdown: false }).is_ok() {
             let _ = wait.await;
         }
         self.sessions.lock().unwrap().remove(&id);
@@ -609,7 +619,7 @@ impl Manager {
         let txs: Vec<mpsc::UnboundedSender<Cmd>> = self.sessions.lock().unwrap().values().map(|h| h.tx.clone()).collect();
         let waits = txs.into_iter().map(|tx| async move {
             let (done, wait) = oneshot::channel();
-            if tx.send(Cmd::Close(done)).is_ok() {
+            if tx.send(Cmd::Close { done, shutdown: true }).is_ok() {
                 let _ = wait.await;
             }
         });
@@ -689,6 +699,19 @@ fn age_out_images(history: &mut VecDeque<EventEnvelope>, keep: usize) {
             }
         }
     }
+}
+
+/// Turns a history accepted (`user_message`) but never ended or steered.
+fn unfinished_turns(history: &VecDeque<EventEnvelope>) -> Vec<String> {
+    let mut open: Vec<String> = Vec::new();
+    for e in history {
+        match &e.event {
+            AgentEvent::UserMessage { turn_id, .. } => open.push(turn_id.clone()),
+            AgentEvent::TurnEnded { turn_id, .. } | AgentEvent::Steered { turn_id, .. } => open.retain(|t| t != turn_id),
+            _ => {}
+        }
+    }
+    open
 }
 
 /// Validate `session.create` launch settings against the agent and the limits.
@@ -904,7 +927,17 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                         shared.meta.lock().unwrap().pending_approvals = approvals.len();
                         let _ = done.send(res);
                     }
-                    Cmd::Close(done) => {
+                    Cmd::Close { done, shutdown } => {
+                        // Every turn this ends gets its turn_ended, so no client
+                        // (or history reader) waits for it forever.
+                        let error = if shutdown { "the agl daemon stopped" } else { "the session was closed" };
+                        let ended = current.take().map(|r| (r.turn_id.clone(), Some(timing(&r)))).into_iter().chain(queue.drain(..).map(|(t, _)| (t, None)));
+                        for (turn_id, timing) in ended.collect::<Vec<_>>() {
+                            emit!(AgentEvent::TurnEnded { turn_id, outcome: "aborted".into(), error: Some(error.into()), usage: None, timing, text: None });
+                        }
+                        if shutdown {
+                            save_history(&shared);
+                        }
                         stop_driver!();
                         mgr.set_status(&shared, "closed");
                         let _ = done.send(());
@@ -1203,6 +1236,9 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
             let Some(d) = driver.as_mut() else { break };
             let Some((turn_id, text)) = queue.pop_front() else { break };
             emit!(AgentEvent::TurnStarted { turn_id: turn_id.clone() });
+            // On disk before the turn runs: a daemon that dies during it
+            // leaves a record the next one ends (`unfinished_turns`).
+            save_history(&shared);
             mgr.set_status(&shared, "running");
             let now = Instant::now();
             let cold = launch_ms.take();
@@ -1283,6 +1319,25 @@ mod tests {
             "created_at": 0, "last_active_at": 0, "origin": origin,
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn turns_left_open_by_a_dead_daemon() {
+        let ev = |event: AgentEvent| EventEnvelope { session_id: "s".into(), seq: 0, ts: 0, event };
+        let user = |t: &str| ev(AgentEvent::UserMessage { turn_id: t.into(), text: "x".into() });
+        let ended = |t: &str| ev(AgentEvent::TurnEnded { turn_id: t.into(), outcome: "completed".into(), error: None, usage: None, timing: None, text: None });
+        let history: VecDeque<_> = [
+            user("a"),
+            ev(AgentEvent::TurnStarted { turn_id: "a".into() }),
+            ended("a"),
+            user("b"),
+            user("c"),
+            ev(AgentEvent::Steered { turn_id: "c".into(), into_turn_id: "b".into() }),
+            user("d"),
+        ]
+        .into();
+        assert_eq!(unfinished_turns(&history), vec!["b", "d"]);
+        assert!(unfinished_turns(&VecDeque::new()).is_empty());
     }
 
     #[test]

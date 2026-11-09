@@ -143,7 +143,12 @@ Use this when your app belongs to the same ecosystem as the user's terminal
 `agl`, or when the machine must stay reachable from the web while the app is
 closed.
 
-1. Connect with `AglClient.local()`, which reads `~/.agl/daemon.json`.
+1. Connect with `AglClient.local()`, which reads `~/.agl/daemon.json` (again
+   before every reconnect: the daemon's port and token change when it
+   restarts, e.g. after an update). Listen with `agl.onConnection(...)`: on
+   `reconnected` with `restarted: true`, every turn you were waiting for is
+   gone; fail it in your UI (`runTurn` already resolves `aborted` with
+   `restarted: true`). See [Reconnects and daemon restarts](protocol.md#reconnects-and-daemon-restarts).
 2. If the daemon is not running, start the bundled binary with `agl start` (or
    `agl service install` for autostart).
 3. Prefix session names with your app id so they don't collide with terminal

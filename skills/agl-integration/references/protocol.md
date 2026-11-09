@@ -123,11 +123,11 @@ vanish for its own creator; `"shared"` (the default) is accepted.
 
 | method | params | result / notes |
 |---|---|---|
-| `ping` | – | `{pong, version, protocol}` |
+| `ping` | – | `{pong, version, protocol, started_at}`. `started_at` (0.3.12) as in `machine.info`: a new value means the daemon restarted. |
 | `machine.info` | – | `{machine_id, hostname, os, arch, version, protocol, agents[], home, started_at}`. `home` is the user's home directory; `started_at` (unix ms) changes when the daemon restarts, which ends every running turn: a hub that sees a new value in `hello` can fail the turns it was waiting for. Both are absent before agl 0.3.0. |
 | `agents.list` | `{check_updates?}` | `AgentInfo[]`: `{id, name, protocol, available, path, version, features[], status, desktop_app?, install?, latest_version?, update?, capabilities?}`. See [Agent discovery](#agent-discovery). |
 | `agents.models` | `{agent}` | `{agent, models: [{id, name, description?, default?, efforts?[]}]}`. Never starts a conversation the user would see. |
-| `daemon.status` | – | Version, protocol, pid, port, `hubs: [{url, status, access, share_local}]` (a hub sees only its own entry), visible sessions, `busy` (sessions with a turn running or queued, from agl 0.3.2), `managed` (started by the autostart service, which restarts it; from 0.3.8), live processes, defaults |
+| `daemon.status` | – | Version, protocol, pid, `started_at` (0.3.12), port, `hubs: [{url, status, access, share_local}]` (a hub sees only its own entry), visible sessions, `busy` (sessions with a turn running or queued, from agl 0.3.2), `managed` (started by the autostart service, which restarts it; from 0.3.8), live processes, defaults |
 | `daemon.update` | `{if_idle?}` | From agl 0.3.2. Updates agl to the newest release (checked against its sha256) and restarts the daemon on it: `{updated, current, latest, busy?, busy_elsewhere?}`. With `if_idle`, nothing happens while a session runs a turn (`busy`). A restart ends running turns, so a hub never ends another's: while a session the hub did not create (another hub's, or a local one) runs a turn, nothing happens even without `if_idle` (`busy_elsewhere`, also counted in `busy`). Any hub link may call it (from agl 0.3.5; before, `full` only): it installs only the official release, never a binary the hub picks. Below `full`, the update always behaves as `if_idle`; the link comes back by itself. The new daemon is started by the autostart service when it runs this daemon, otherwise by agl itself (before 0.3.8 an installed but idle service unit made agl skip that, and the daemon stayed down). Under launchd agl also kickstarts the job, since launchd may defer a KeepAlive respawn, and even a RunAtLoad start after `agl service install`, indefinitely (0.3.9 / 0.3.10). An agl inside an app bundle is updated with the app instead. |
 | `session.create` | `{agent, cwd?, model?, effort?, access?, name?, resume?, warm?, visibility?, history?, extra_args?, instructions?, ephemeral?}` | `SessionMeta`. Details: |
 | | | `name`: if a session with that name exists (and is visible to the caller), it is reused. |
@@ -304,6 +304,38 @@ Rules for clients:
   and then resume handling live events.
 - Do not treat `text_delta` as final until `turn_ended`. On `aborted`, the text
   streamed so far is partial.
+
+### Reconnects and daemon restarts
+
+A turn runs inside the daemon process, so a daemon restart (`agl update`,
+`daemon.update`, `agl stop`/`start`, a crash, a reboot) ends it. What a
+client sees, from agl 0.3.12:
+
+- **Clean stop** (signal, `daemon.shutdown`, an update): every running and
+  queued turn gets `turn_ended {outcome: "aborted", error: "the agl daemon
+  stopped"}`. It goes to connected clients and hub links if they are still
+  connected, and always into the history. `session.close` does the same with
+  `error: "the session was closed"`.
+- **Crash or kill -9**: nothing can be sent. The next daemon adds
+  `turn_ended {outcome: "aborted", error: "the agl daemon stopped during this
+  turn"}` to the history of every turn it finds started (or accepted) and
+  never ended. Sessions created with `history: false` have no history to
+  repair.
+- Either way **a client must not wait for a live `turn_ended` across a
+  reconnect.** After reconnecting, compare `started_at` (`ping`, or `pid` from
+  `daemon.status` before 0.3.12) with the value you had: if it changed, every
+  turn you were waiting for is gone, fail it. If it did not, only your
+  socket dropped: read what you missed with `session.history {after_seq}`
+  (which includes a `turn_ended` that happened meanwhile) and carry on.
+- The local daemon's port and token change across restarts (unless fixed by
+  `--port` and `AGL_LOCAL_TOKEN`): re-read `$AGL_HOME/daemon.json` before
+  every reconnect.
+
+`clients/typescript/agl.ts` does all of this: `AglClient.local()` re-reads
+`daemon.json` on every reconnect, `onConnection` reports `disconnected` and
+`reconnected {restarted}`, and `runTurn` resolves `{outcome: "aborted",
+restarted: true}` instead of hanging when the daemon restarted, or catches up
+from the history when it did not.
 
 ### Final answer
 

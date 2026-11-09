@@ -58,6 +58,10 @@ async fn dispatcher() {
     });
     std::fs::write(home.join("config.json"), config.to_string()).unwrap();
     let d = daemon(Config::load().unwrap());
+    let pong = call(&d, "ping", json!({}), &local).await.unwrap();
+    assert!(pong["started_at"].as_u64().unwrap() > 0, "restart detection: {pong}");
+    let status = call(&d, "daemon.status", json!({}), &local).await.unwrap();
+    assert_eq!(status["started_at"], pong["started_at"]);
     let list = call(&d, "agents.list", json!({}), &local).await.unwrap();
     assert_eq!(agent(&list, "late")["available"], false);
 

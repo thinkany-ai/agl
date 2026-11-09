@@ -285,10 +285,14 @@ async fn local_conn(d: Arc<Daemon>, socket: WebSocket) {
 /// When this process started serving, for `MachineInfo::started_at`.
 static STARTED_AT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
+fn started_at() -> u64 {
+    *STARTED_AT.get_or_init(crate::protocol::now_ms)
+}
+
 pub async fn machine_info(cfg: &Config) -> MachineInfo {
     MachineInfo {
         home: dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_default(),
-        started_at: *STARTED_AT.get_or_init(crate::protocol::now_ms),
+        started_at: started_at(),
         machine_id: cfg.machine_id.clone(),
         hostname: cfg.machine_name.clone().unwrap_or_else(config::hostname),
         os: std::env::consts::OS.into(),
@@ -321,7 +325,8 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
     // The session a request names, checked against the caller's visibility.
     let sid = || -> Result<String> { mgr.resolve_for(str_param(&params, "session_id")?, origin) };
     Ok(match method {
-        "ping" => json!({"pong": true, "version": VERSION, "protocol": PROTOCOL}),
+        // `started_at` changes when the daemon restarts (which ends every turn).
+        "ping" => json!({"pong": true, "version": VERSION, "protocol": PROTOCOL, "started_at": started_at()}),
         "machine.info" => serde_json::to_value(machine_info(&mgr.cfg()).await)?,
         "agents.list" => serde_json::to_value(agents::detect(&mgr.cfg(), params["check_updates"].as_bool().unwrap_or(false)).await)?,
         "agents.models" => agents::list_models(&mgr.cfg(), str_param(&params, "agent")?).await?,
@@ -339,6 +344,7 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
                 "version": VERSION,
                 "protocol": PROTOCOL,
                 "pid": std::process::id(),
+                "started_at": started_at(),
                 "port": *d.port.lock().unwrap(),
                 "home": if local { json!(config::home()) } else { Value::Null },
                 "machine_id": cfg.machine_id,
