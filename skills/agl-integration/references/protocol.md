@@ -129,7 +129,7 @@ vanish for its own creator; `"shared"` (the default) is accepted.
 | `agents.models` | `{agent}` | `{agent, models: [{id, name, description?, default?, efforts?[]}]}`. Never starts a conversation the user would see. |
 | `daemon.status` | – | Version, protocol, pid, port, `hubs: [{url, status, access, share_local}]` (a hub sees only its own entry), visible sessions, `busy` (sessions with a turn running or queued, from agl 0.3.2), `managed` (started by the autostart service, which restarts it; from 0.3.8), live processes, defaults |
 | `daemon.update` | `{if_idle?}` | From agl 0.3.2. Updates agl to the newest release (checked against its sha256) and restarts the daemon on it: `{updated, current, latest, busy?, busy_elsewhere?}`. With `if_idle`, nothing happens while a session runs a turn (`busy`). A restart ends running turns, so a hub never ends another's: while a session the hub did not create (another hub's, or a local one) runs a turn, nothing happens even without `if_idle` (`busy_elsewhere`, also counted in `busy`). Any hub link may call it (from agl 0.3.5; before, `full` only): it installs only the official release, never a binary the hub picks. Below `full`, the update always behaves as `if_idle`; the link comes back by itself. The new daemon is started by the autostart service when it runs this daemon, otherwise by agl itself (before 0.3.8 an installed but idle service unit made agl skip that, and the daemon stayed down). Under launchd agl also kickstarts the job, since launchd may defer a KeepAlive respawn, and even a RunAtLoad start after `agl service install`, indefinitely (0.3.9 / 0.3.10). An agl inside an app bundle is updated with the app instead. |
-| `session.create` | `{agent, cwd?, model?, effort?, access?, name?, resume?, warm?, visibility?, history?}` | `SessionMeta`. Details: |
+| `session.create` | `{agent, cwd?, model?, effort?, access?, name?, resume?, warm?, visibility?, history?, extra_args?, instructions?, ephemeral?}` | `SessionMeta`. Details: |
 | | | `name`: if a session with that name exists (and is visible to the caller), it is reused. |
 | | | `access`: when omitted, the config's `default_access` for local callers, the link's `access` (default `ask`) for a hub. |
 | | | `resume`: attaches a native id. |
@@ -137,6 +137,8 @@ vanish for its own creator; `"shared"` (the default) is accepted.
 | | | `cwd` defaults to the home directory, and `~/` is expanded. |
 | | | `visibility` (0.3.12): `shared` (default) or `local`, which hides the session from every hub link; see [Visibility](#visibility-one-machine-several-hubs). Local clients only. |
 | | | `history` (0.3.12): `false` keeps the session's events out of `$AGL_HOME/history`; see [History](#history). Default `true`. |
+| | | `extra_args`, `instructions`, `ephemeral` (0.3.12): [launch settings](#launch-settings-local-only), local clients only. |
+| | | Settings apply when the session is created; reusing a session by `name` keeps its own. |
 | `session.prompt` | `{session_id, text, mode?, turn_id?}` | `{session_id, turn_id}`, returned as soon as the prompt is accepted. `mode`: |
 | | | `queue` (default): run after the current turn. |
 | | | `steer`: inject into the running turn (claude, codex); otherwise falls back to queue. |
@@ -187,7 +189,49 @@ Hub-level methods take no `machine_id`:
 is what the runtime reported running. `origin` is `local` or a hub URL.
 `visibility` is `shared` or `local` (from 0.3.12; absent before, read it as
 `shared`). `history` is whether events are written to disk, and `last_seq` the
-`seq` of the session's newest event (both from 0.3.12).
+`seq` of the session's newest event (both from 0.3.12). `extra_args`,
+`instructions` and `ephemeral` appear when set (local clients only; a hub
+never sees `extra_args` or `instructions`).
+
+## Launch settings (local only)
+
+From agl 0.3.12, a **local** client can tune how a session's agent is
+launched. These fields are never accepted from a hub link: a hub request
+carrying any of them (even `false` or empty) fails with
+`` `<field>` is accepted from local connections only (`extra_args`, `instructions`, `ephemeral`) ``.
+They are stored with the session (in `sessions.json`, 0600) and used every
+time its process starts, including after suspension or a daemon restart.
+
+| field | effect | agents |
+|---|---|---|
+| `extra_args: string[]` | Appended to the agent's launch arguments, after agl's own. | every agent (`extra_args` feature): claude after its flags; codex after `app-server …`; ACP after the agent's own args; cursor before the `--` that precedes the prompt; pi at the end |
+| `instructions: string` | Extra system / developer instructions, on top of the agent's own (not replacing them). | claude (`--append-system-prompt`), codex (`developerInstructions`, on `thread/start` and `thread/resume`): the `instructions` feature. Other agents have no native way and reject it: `` agent `<id>` does not support `instructions` ``. Blank text is ignored. |
+| `ephemeral: true` | The agent keeps no conversation of its own on disk. | claude (`--no-session-persistence`), codex (ephemeral thread, no rollout): the `ephemeral` feature. Others reject it: `` agent `<id>` does not support `ephemeral` ``. |
+
+Limits: at most 64 `extra_args` of at most 4096 bytes each, `instructions`
+up to 32 KiB, no NUL bytes; anything over is rejected
+(`` `extra_args` takes at most 64 arguments ``,
+`` an `extra_args` entry is <n> bytes; the limit is 4096 ``,
+`` `instructions` is <n> bytes; the limit is 32768 ``).
+
+An ephemeral session cannot be resumed natively, so `resume` together with
+`ephemeral` is rejected, and whenever its process stops (idle suspension after
+`idle_timeout_secs`, eviction by `max_live`, `session.configure` of model /
+effort / access, a daemon restart) the next turn starts a new conversation
+without the earlier context, after an `error` event (`ephemeral session: the
+agent restarted without its earlier context`). Keep the session warm, or
+raise `idle_timeout_secs`, if that matters. `ephemeral` is about the agent's
+own store; `history: false` is about agl's.
+
+**Security.** `extra_args` reach the agent as separate argv entries, never
+through a shell, so there is no shell injection; but agl does not interpret
+them, and they come after agl's own flags, so they can change anything the
+agent's CLI allows, including what `access` set up (for example claude
+`--permission-mode`, codex `-c sandbox_mode=…`, MCP servers, the model). That
+is why only local clients, which hold the daemon token and could run any
+command anyway, may set them; never build them from text a remote user or a
+model controls. `instructions` on claude is a command-line argument, so other
+local users can read it in the process list (`ps`); don't put secrets in it.
 
 ## History
 
@@ -205,8 +249,9 @@ A session created with `history: false` (from 0.3.12):
   arrive. `seq` numbering continues where it was (`last_seq` is kept in
   `sessions.json`), so a client's `after_seq` stays valid.
 
-`sessions.json` holds session metadata only (`SessionMeta`), never prompts
-or replies, for every session. Prompts and replies live only in the history,
+`sessions.json` holds session metadata only (`SessionMeta`, including the
+[launch settings](#launch-settings-local-only) a session needs to restart, such
+as `instructions`), never prompts or replies, for every session. Prompts and replies live only in the history,
 and in the agent's own conversation store (`~/.claude`, `~/.codex`, …), which
 agl does not manage.
 

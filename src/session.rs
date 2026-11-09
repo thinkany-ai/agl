@@ -90,11 +90,30 @@ pub struct SessionMeta {
     /// restart even when no history was written.
     #[serde(default)]
     pub last_seq: u64,
+    /// Appended to the agent's launch arguments. Local clients only: never
+    /// set by, nor shown to, a hub.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
+    /// Extra system / developer instructions. Local clients only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// The agent keeps no native conversation on disk, so the session
+    /// cannot be resumed natively once its process stops.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ephemeral: bool,
 }
 
 fn yes() -> bool {
     true
 }
+
+/// Limits on `session.create` launch settings.
+pub const MAX_EXTRA_ARGS: usize = 64;
+pub const MAX_EXTRA_ARG_BYTES: usize = 4096;
+pub const MAX_INSTRUCTIONS_BYTES: usize = 32 * 1024;
+
+/// `session.create` fields only local clients may set.
+pub const LOCAL_ONLY_CREATE_FIELDS: &[&str] = &["extra_args", "instructions", "ephemeral"];
 
 fn default_access() -> String {
     "full".into()
@@ -215,6 +234,17 @@ pub struct CreateParams {
     /// `$AGL_HOME/history` (default true).
     #[serde(default)]
     pub history: Option<bool>,
+    /// Appended to the agent's launch arguments (every agent; local only).
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    /// Extra system / developer instructions, for agents with the
+    /// `instructions` feature (local only).
+    #[serde(default)]
+    pub instructions: Option<String>,
+    /// Keep no native conversation on disk, for agents with the `ephemeral`
+    /// feature (local only).
+    #[serde(default)]
+    pub ephemeral: bool,
     /// Set by the dispatcher, never by the caller.
     #[serde(skip)]
     pub origin: Option<Origin>,
@@ -352,6 +382,14 @@ impl Manager {
         if visibility == "local" && origin != Origin::Local {
             bail!("a hub cannot create a `local` session: it would be hidden from that hub too");
         }
+        let instructions = p.instructions.clone().filter(|t| !t.trim().is_empty());
+        if origin != Origin::Local && (!p.extra_args.is_empty() || instructions.is_some() || p.ephemeral) {
+            bail!("`extra_args`, `instructions` and `ephemeral` are accepted from local connections only");
+        }
+        check_launch(&def, &p.extra_args, instructions.as_deref(), p.ephemeral)?;
+        if p.ephemeral && p.resume.is_some() {
+            bail!("an `ephemeral` session cannot `resume` a native conversation");
+        }
         if let Some(name) = &p.name {
             if let Some(id) = self.resolve(name) {
                 let (_, shared, tx) = self.handle(&id)?;
@@ -400,6 +438,9 @@ impl Manager {
             visibility,
             history: p.history.unwrap_or(true),
             last_seq: 0,
+            extra_args: p.extra_args,
+            instructions,
+            ephemeral: p.ephemeral,
         };
         let shared = self.start_actor(meta.clone());
         if p.warm {
@@ -648,6 +689,36 @@ fn age_out_images(history: &mut VecDeque<EventEnvelope>, keep: usize) {
             }
         }
     }
+}
+
+/// Validate `session.create` launch settings against the agent and the limits.
+fn check_launch(def: &agents::AgentDef, extra_args: &[String], instructions: Option<&str>, ephemeral: bool) -> Result<()> {
+    if extra_args.len() > MAX_EXTRA_ARGS {
+        bail!("`extra_args` takes at most {MAX_EXTRA_ARGS} arguments");
+    }
+    if let Some(a) = extra_args.iter().find(|a| a.len() > MAX_EXTRA_ARG_BYTES) {
+        bail!("an `extra_args` entry is {} bytes; the limit is {MAX_EXTRA_ARG_BYTES}", a.len());
+    }
+    if extra_args.iter().any(|a| a.contains('\0')) {
+        bail!("`extra_args` entries cannot contain NUL bytes");
+    }
+    let features = def.protocol.features();
+    let supports = |f: &str| features.iter().any(|x| x == f);
+    if let Some(text) = instructions {
+        if !supports("instructions") {
+            bail!("agent `{}` does not support `instructions` (no `instructions` in its features)", def.id);
+        }
+        if text.len() > MAX_INSTRUCTIONS_BYTES {
+            bail!("`instructions` is {} bytes; the limit is {MAX_INSTRUCTIONS_BYTES}", text.len());
+        }
+        if text.contains('\0') {
+            bail!("`instructions` cannot contain NUL bytes");
+        }
+    }
+    if ephemeral && !supports("ephemeral") {
+        bail!("agent `{}` does not support `ephemeral` (no `ephemeral` in its features)", def.id);
+    }
+    Ok(())
 }
 
 /// No turn running, starting, waiting on an approval, or queued.
@@ -1080,20 +1151,28 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
             if permit.is_some() || for_turn {
                 generation = mgr.generation.fetch_add(1, Ordering::SeqCst);
                 let cfg = mgr.cfg();
-                let spec = {
+                let (spec, context_lost) = {
                     let m = shared.meta.lock().unwrap();
-                    agents::find_def(&cfg, &m.agent).map(|def| SpawnSpec {
+                    let spec = agents::find_def(&cfg, &m.agent).map(|def| SpawnSpec {
                         strip_api_key: m.use_login || (def.protocol == Protocol::Claude && mgr.claude_use_login.load(Ordering::SeqCst)),
                         def,
                         cwd: m.cwd.clone(),
                         model: m.model.clone(),
                         effort: m.effort.clone(),
-                        resume: m.native_id.clone(),
+                        // An ephemeral conversation was never saved: start over.
+                        resume: if m.ephemeral { None } else { m.native_id.clone() },
                         access: m.access.clone(),
                         tool_output_limit: cfg.tool_output_limit,
                         generation,
-                    })
+                        extra_args: m.extra_args.clone(),
+                        instructions: m.instructions.clone(),
+                        ephemeral: m.ephemeral,
+                    });
+                    (spec, m.ephemeral && m.native_id.is_some())
                 };
+                if context_lost {
+                    emit!(AgentEvent::Error { message: "ephemeral session: the agent restarted without its earlier context".into() });
+                }
                 mgr.set_status(&shared, "starting");
                 let t0 = Instant::now();
                 let res = match spec {

@@ -78,6 +78,47 @@ async fn dispatcher() {
     assert_eq!(late["available"], true, "{late}");
     assert_eq!(late["path"], json!(bin_dir.join("agl-late-agent")));
     assert_eq!(late["version"], "late 1.0");
+    let claude = agent(&list, "claude");
+    for f in ["extra_args", "instructions", "ephemeral"] {
+        assert!(claude["features"].as_array().unwrap().iter().any(|x| x == f), "claude reports {f}");
+    }
+    assert!(!agent(&list, "late")["features"].as_array().unwrap().iter().any(|x| x == "instructions"), "ACP agents do not");
+
+    // --- Launch settings are for local connections only --------------------
+    let cwd = std::env::temp_dir();
+    for field in [json!({"extra_args": ["--x"]}), json!({"instructions": "be brief"}), json!({"ephemeral": false})] {
+        let mut p = json!({"agent": "claude", "cwd": cwd});
+        p.as_object_mut().unwrap().extend(field.as_object().unwrap().clone());
+        let err = call(&d, "session.create", p, &hub()).await.unwrap_err();
+        assert!(err.contains("accepted from local connections only"), "{field}: {err}");
+    }
+    let p = json!({"agent": "claude", "cwd": cwd, "extra_args": ["--x"], "instructions": "be brief", "ephemeral": true, "name": "tuned"});
+    let created = call(&d, "session.create", p, &local).await.unwrap();
+    assert_eq!((created["extra_args"].clone(), created["instructions"].clone(), created["ephemeral"].clone()), (json!(["--x"]), json!("be brief"), json!(true)));
+    let seen = call(&d, "session.get", json!({"session_id": "tuned"}), &hub()).await.unwrap();
+    assert!(seen["extra_args"].is_null() && seen["instructions"].is_null(), "a hub never sees them: {seen}");
+    let listed = call(&d, "session.list", json!({}), &hub()).await.unwrap();
+    assert!(listed[0]["instructions"].is_null());
+    let saved = std::fs::read_to_string(home.join("sessions.json")).unwrap();
+    assert!(saved.contains("be brief"), "kept for restarts");
+
+    // --- Local sessions do not exist for hubs ------------------------------
+    let p = json!({"agent": "claude", "cwd": cwd, "name": "private", "visibility": "local"});
+    let private = call(&d, "session.create", p, &local).await.unwrap();
+    let id = private["id"].as_str().unwrap();
+    for key in [id, "private", &id[..6]] {
+        let err = call(&d, "session.get", json!({"session_id": key}), &hub()).await.unwrap_err();
+        assert_eq!(err, format!("no session `{key}`"), "same answer as for an unknown session");
+        let err = call(&d, "session.prompt", json!({"session_id": key, "text": "hi"}), &hub()).await.unwrap_err();
+        assert_eq!(err, format!("no session `{key}`"));
+    }
+    let listed = call(&d, "session.list", json!({}), &hub()).await.unwrap();
+    assert!(!listed.as_array().unwrap().iter().any(|m| m["id"] == id));
+    let status = call(&d, "daemon.status", json!({}), &hub()).await.unwrap();
+    assert_eq!(status["sessions"], 1, "only `tuned`");
+    let err = call(&d, "session.create", json!({"agent": "claude", "cwd": cwd, "visibility": "local"}), &hub()).await.unwrap_err();
+    assert!(err.contains("cannot create a `local` session"), "{err}");
+    assert_eq!(call(&d, "session.list", json!({}), &local).await.unwrap().as_array().unwrap().len(), 2);
 
     d.mgr.shutdown_all().await;
 }

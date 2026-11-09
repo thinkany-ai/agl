@@ -26,7 +26,7 @@ use tokio::sync::{broadcast, mpsc, Notify};
 use crate::agents;
 use crate::config::{self, Config};
 use crate::protocol::{MachineInfo, WireMsg, PROTOCOL, VERSION};
-use crate::session::{ConfigureParams, CreateParams, Manager, Origin};
+use crate::session::{ConfigureParams, CreateParams, Manager, Origin, SessionMeta, LOCAL_ONLY_CREATE_FIELDS};
 
 pub struct Daemon {
     pub mgr: Arc<Manager>,
@@ -299,6 +299,16 @@ pub async fn machine_info(cfg: &Config) -> MachineInfo {
     }
 }
 
+/// A session as the caller may see it: a hub never sees the launch settings
+/// a local client gave (they may carry paths, prompts or secrets).
+fn for_caller(mut m: SessionMeta, origin: &Origin) -> SessionMeta {
+    if *origin != Origin::Local {
+        m.extra_args.clear();
+        m.instructions = None;
+    }
+    m
+}
+
 fn str_param<'a>(params: &'a Value, key: &str) -> Result<&'a str> {
     params[key].as_str().ok_or_else(|| anyhow!("missing parameter `{key}`"))
 }
@@ -393,6 +403,11 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
             json!({"ok": true, "path": crate::shellenv::path_entries()})
         }
         "session.create" => {
+            if !local {
+                if let Some(k) = LOCAL_ONLY_CREATE_FIELDS.iter().find(|k| !params[**k].is_null()) {
+                    return Err(anyhow!("`{k}` is accepted from local connections only (`extra_args`, `instructions`, `ephemeral`)"));
+                }
+            }
             let mut p: CreateParams = serde_json::from_value(params).context("session.create params")?;
             if p.access.is_none() {
                 if let Origin::Hub { url, .. } = origin {
@@ -401,7 +416,7 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
                 }
             }
             p.origin = Some(origin.clone());
-            serde_json::to_value(mgr.create(p)?)?
+            serde_json::to_value(for_caller(mgr.create(p)?, origin))?
         }
         "session.prompt" => {
             let text = str_param(&params, "text")?.to_string();
@@ -423,14 +438,14 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
         "session.configure" => {
             let key = sid()?;
             let p: ConfigureParams = serde_json::from_value(params).context("session.configure params")?;
-            serde_json::to_value(mgr.configure(&key, p)?)?
+            serde_json::to_value(for_caller(mgr.configure(&key, p)?, origin))?
         }
         "session.close" => {
             mgr.close(&sid()?).await?;
             json!({"ok": true})
         }
-        "session.get" => serde_json::to_value(mgr.get(&sid()?)?)?,
-        "session.list" => serde_json::to_value(mgr.list().into_iter().filter(|m| origin.can_see(m)).collect::<Vec<_>>())?,
+        "session.get" => serde_json::to_value(for_caller(mgr.get(&sid()?)?, origin))?,
+        "session.list" => serde_json::to_value(mgr.list().into_iter().filter(|m| origin.can_see(m)).map(|m| for_caller(m, origin)).collect::<Vec<_>>())?,
         "session.history" => {
             let after = params["after_seq"].as_u64().unwrap_or(0);
             let limit = params["limit"].as_u64().map(|n| n as usize);

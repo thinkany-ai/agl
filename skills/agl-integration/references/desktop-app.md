@@ -70,6 +70,8 @@ valid token.
 | send while running | `session.prompt {mode: "steer"}` if the session has the `steer` feature, else `"queue"` |
 | tool approval dialog | `permission_request` → `session.approve` |
 | "done" notification, thread preview, the answer you store | `turn_ended.text`: the final answer without interim commentary (agl 0.3.12+) |
+| per-thread system prompt, CLI flags, "don't keep it in the agent's history" | `session.create {instructions, extra_args, ephemeral}` (agl 0.3.12+, local connections only; check the agent's `features`) |
+| thread that must not be written to disk by agl | `session.create {history: false}` |
 
 ### Packaging
 

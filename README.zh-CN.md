@@ -135,6 +135,7 @@ Hub 的二进制分发：Hub 从 `--dist <dir>` 目录提供 `agl-<os>-<arch>` �
 
 - `full` 等于让 Agent 以你的身份执行任意命令。Hub 创建的会话默认 `ask`（可用 `agl connect … --access` 按连接修改），远程使用时 Agent 执行有风险的操作前都会先询问。
 - 本地 daemon 只监听 127.0.0.1，每个连接都要带 `daemon.json` 里的 token。
+- 会改变 agent 运行方式的启动参数（`extra_args`、`instructions`、`ephemeral`）只接受本地连接，hub 不能设置。
 - Hub 的机器 token 服务端只存哈希，可以单独吊销；配对码 10 分钟有效，只能用一次。
 
 ## 许可证

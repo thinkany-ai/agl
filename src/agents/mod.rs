@@ -56,12 +56,14 @@ impl Protocol {
         }
     }
 
+    /// `extra_args`, `instructions` and `ephemeral` say which
+    /// `session.create` launch settings the agent takes (agl 0.3.12+).
     pub fn features(self) -> Vec<String> {
         let f: &[&str] = match self {
-            Protocol::Claude => &["warm", "approvals", "steer", "interrupt", "models", "effort"],
-            Protocol::Codex => &["warm", "approvals", "steer", "interrupt", "models", "effort"],
-            Protocol::Acp => &["warm", "approvals", "interrupt", "models"],
-            Protocol::Cursor | Protocol::Pi => &["resume", "interrupt", "models"],
+            Protocol::Claude => &["warm", "approvals", "steer", "interrupt", "models", "effort", "extra_args", "instructions", "ephemeral"],
+            Protocol::Codex => &["warm", "approvals", "steer", "interrupt", "models", "effort", "extra_args", "instructions", "ephemeral"],
+            Protocol::Acp => &["warm", "approvals", "interrupt", "models", "extra_args"],
+            Protocol::Cursor | Protocol::Pi => &["resume", "interrupt", "models", "extra_args"],
         };
         f.iter().map(|s| s.to_string()).collect()
     }
@@ -261,6 +263,12 @@ pub struct SpawnSpec {
     pub strip_api_key: bool,
     pub tool_output_limit: usize,
     pub generation: u64,
+    /// Appended to the agent's launch arguments (local clients only).
+    pub extra_args: Vec<String>,
+    /// Extra system / developer instructions (`instructions` feature).
+    pub instructions: Option<String>,
+    /// Keep no native conversation on disk (`ephemeral` feature).
+    pub ephemeral: bool,
 }
 
 /// A throwaway spec for metadata probes (model lists).
@@ -275,6 +283,9 @@ pub(crate) fn probe_spec(id: &str, protocol: Protocol) -> SpawnSpec {
         strip_api_key: false,
         tool_output_limit: 0,
         generation: 0,
+        extra_args: Vec::new(),
+        instructions: None,
+        ephemeral: false,
     }
 }
 

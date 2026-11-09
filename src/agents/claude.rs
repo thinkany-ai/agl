@@ -65,6 +65,14 @@ impl ClaudeDriver {
                 id
             }
         };
+        if let Some(text) = &spec.instructions {
+            cmd.args(["--append-system-prompt", text]);
+        }
+        if spec.ephemeral {
+            cmd.arg("--no-session-persistence");
+        }
+        // Last, as separate argv entries (no shell): they can override ours.
+        cmd.args(&spec.extra_args);
         let mut child = cmd.spawn().with_context(|| format!("spawn {}", bin.display()))?;
         if let Some(pid) = child.id() {
             track(pid);

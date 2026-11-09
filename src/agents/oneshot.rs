@@ -55,6 +55,8 @@ impl OneShotDriver {
                 if let Some(m) = &self.spec.model {
                     cmd.args(["--model", m]);
                 }
+                // Before `--`, so neither can be taken for the other.
+                cmd.args(&self.spec.extra_args);
                 cmd.arg("--").arg(text);
             }
             _ => {
@@ -65,6 +67,7 @@ impl OneShotDriver {
                 if let Some(m) = &self.spec.model {
                     cmd.args(["--model", m]);
                 }
+                cmd.args(&self.spec.extra_args);
                 stdin_text = Some(text.to_string());
             }
         }

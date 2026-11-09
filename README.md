@@ -138,6 +138,7 @@ Other files in `~/.agl/`:
 
 - `full` access lets the agent run any command as you. Sessions created by a hub default to `ask` (per link: `agl connect … --access`), so remote use asks before acting unless you opt in.
 - The local daemon listens on 127.0.0.1 only, and every connection must present the token from `daemon.json`.
+- Launch settings that can change how an agent runs (`extra_args`, `instructions`, `ephemeral`) are accepted from local connections only, never from a hub.
 - The hub stores only hashes of machine tokens, and each machine can be revoked individually. Pairing codes are single-use and expire after 10 minutes.
 
 ## License

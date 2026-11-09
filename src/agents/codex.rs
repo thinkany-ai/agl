@@ -96,6 +96,10 @@ fn thread_params(spec: &SpawnSpec) -> Value {
     if let Some(m) = &spec.model {
         p["model"] = json!(m);
     }
+    // Repeated on resume too, like the model.
+    if let Some(text) = &spec.instructions {
+        p["developerInstructions"] = json!(text);
+    }
     p
 }
 
@@ -103,6 +107,8 @@ fn app_server(bin: &Path, spec: &SpawnSpec) -> tokio::process::Command {
     let mut cmd = base_command(bin, spec);
     // notify=[] keeps the user's desktop notification hook from firing per turn.
     cmd.args(["app-server", "-c", "notify=[]", "--listen", "stdio://"]);
+    // Last, as separate argv entries (no shell): e.g. `-c key=value`.
+    cmd.args(&spec.extra_args);
     cmd
 }
 
@@ -199,6 +205,10 @@ impl CodexDriver {
                     Err(e) => return Err(e.context(format!("resume codex thread {id}"))),
                 }
             }
+        }
+        if spec.ephemeral {
+            // No rollout on disk; the thread cannot be resumed later.
+            params["ephemeral"] = json!(true);
         }
         let r = self.peer.request("thread/start", params, ACK).await?;
         if r["thread"]["id"].as_str().is_none() {
@@ -753,5 +763,8 @@ standalone_web_search                    under development  false\n";
         }
         spec.model = Some("gpt-x".into());
         assert_eq!(thread_params(&spec)["model"], "gpt-x", "the model is always repeated");
+        assert!(thread_params(&spec).get("developerInstructions").is_none());
+        spec.instructions = Some("Be terse.".into());
+        assert_eq!(thread_params(&spec)["developerInstructions"], "Be terse.", "on start and resume alike");
     }
 }

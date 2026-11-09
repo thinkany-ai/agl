@@ -51,6 +51,9 @@ export interface SessionMeta {
   id: string; name?: string; agent: string; cwd: string; model?: string; current_model?: string; effort?: string; access: Access; origin: string;
   native_id?: string; status: string; created_at: number; last_active_at: number; turns: number;
   queued: number; live: boolean; pending_approvals: number; features: string[];
+  /** agl 0.3.12+ */
+  visibility?: "shared" | "local"; history?: boolean; last_seq?: number;
+  extra_args?: string[]; instructions?: string; ephemeral?: boolean;
 }
 
 export interface InstallInfo {
@@ -70,7 +73,19 @@ export interface AgentInfo {
   latest_version?: string; update?: "available" | "current" | "unknown";
 }
 
-export interface CreateSession { agent: string; cwd?: string; model?: string; effort?: string; access?: Access; name?: string; resume?: string; warm?: boolean }
+export interface CreateSession {
+  agent: string; cwd?: string; model?: string; effort?: string; access?: Access; name?: string; resume?: string; warm?: boolean;
+  /** agl 0.3.12+: `local` hides the session from every hub link. */
+  visibility?: "shared" | "local";
+  /** agl 0.3.12+: false keeps its events out of $AGL_HOME/history (memory only). */
+  history?: boolean;
+  /** agl 0.3.12+, local connections only: appended to the agent's launch arguments. */
+  extra_args?: string[];
+  /** agl 0.3.12+, local only, agents with the `instructions` feature. */
+  instructions?: string;
+  /** agl 0.3.12+, local only, agents with the `ephemeral` feature. */
+  ephemeral?: boolean;
+}
 
 /**
  * `text`: every non-commentary `text_delta` of the turn. `answer`: the final

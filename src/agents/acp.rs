@@ -57,7 +57,7 @@ fn modes_for(access: &str) -> &'static [&'static str] {
 impl AcpDriver {
     pub async fn spawn(bin: &Path, spec: &SpawnSpec, tx: DriverTx) -> Result<Self> {
         let mut cmd = base_command(bin, spec);
-        cmd.args(&spec.def.args);
+        cmd.args(&spec.def.args).args(&spec.extra_args);
         let mut child = cmd.spawn().with_context(|| format!("spawn {}", bin.display()))?;
         if let Some(pid) = child.id() {
             track(pid);

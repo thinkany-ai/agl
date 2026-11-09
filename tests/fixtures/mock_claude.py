@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """A scripted Claude Code (`claude -p --input-format stream-json`) for agl's
 tests. Prompt keywords: TOOL asks `can_use_tool` and reports the decision;
-anything else is echoed as streamed text deltas."""
+ARGS answers with its command line (JSON); anything else is echoed as
+streamed text deltas."""
 import json
 import sys
 import uuid
@@ -58,6 +59,9 @@ for line in lines:
             {"type": "tool_result", "tool_use_id": "tu1", "is_error": behavior != "allow", "content": behavior}]}})
         delta(behavior)
         result(behavior)
+    elif "ARGS" in text:
+        delta(json.dumps(sys.argv[1:]))
+        result(json.dumps(sys.argv[1:]))
     else:
         delta("echo: ")
         delta(text)

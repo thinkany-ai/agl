@@ -9,6 +9,7 @@ Prompt keywords:
             resume can be tested across processes)
   RECALL    answers with the remembered word
   ANSWER    "Looking." then a tool call, then "Final answer."
+  ARGS      answers with its command line (JSON)
   anything else: "echo: <prompt>" in two chunks
 State lives in $MOCK_STATE_DIR (one file per session id).
 """
@@ -81,6 +82,8 @@ def prompt(rid, p):
                      "content": [{"type": "content", "content": {"type": "text", "text": "data"}}]})
         chunk(sid, "Final ")
         chunk(sid, "answer.")
+    elif "ARGS" in text:
+        chunk(sid, json.dumps(sys.argv[1:]))
     elif "SLOW" in text:
         for i in range(150):
             if sid in cancelled:

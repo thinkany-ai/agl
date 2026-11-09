@@ -243,6 +243,52 @@ async fn sessions_end_to_end() {
     assert_eq!(t.text, "allow", "full access allows by policy");
     assert!(has(&t.events, |e| matches!(e, AgentEvent::PermissionRequest { decided_by: Some(by), .. } if by == "policy")));
 
+    // --- Launch settings: extra_args, instructions, ephemeral ---------------
+    let p = CreateParams {
+        agent: "mockclaude".into(),
+        extra_args: vec!["--custom-flag".into(), "value with spaces; $(not run)".into()],
+        instructions: Some("Answer in French.".into()),
+        ephemeral: true,
+        ..Default::default()
+    };
+    let custom = mgr.create(p).unwrap();
+    assert!(custom.ephemeral && custom.instructions.is_some());
+    let argv = |t: &Turn| serde_json::from_str::<Vec<String>>(&t.text).unwrap();
+    let args = argv(&turn(&mgr, &mut rx, &custom.id, "ARGS", "queue", None).await);
+    let at = |a: &str| args.iter().position(|x| x == a).unwrap_or_else(|| panic!("{a} missing from {args:?}"));
+    assert_eq!(args[at("--append-system-prompt") + 1], "Answer in French.");
+    at("--no-session-persistence");
+    assert_eq!(&args[args.len() - 2..], ["--custom-flag", "value with spaces; $(not run)"], "appended last, verbatim");
+    // An ephemeral session never resumes: its process restarts afresh.
+    let first_native = mgr.get(&custom.id).unwrap().native_id.unwrap();
+    mgr.gc(true).await;
+    wait_status(&mgr, &custom.id, "suspended").await;
+    let t = turn(&mgr, &mut rx, &custom.id, "ARGS", "queue", None).await;
+    let args = argv(&t);
+    assert!(!args.iter().any(|a| a == "--resume"), "{args:?}");
+    assert_ne!(mgr.get(&custom.id).unwrap().native_id.unwrap(), first_native);
+    let lost = mgr.history(&custom.id, 0, None).unwrap();
+    assert!(lost.iter().any(|e| matches!(&e.event, AgentEvent::Error { message } if message.contains("without its earlier context"))));
+
+    let acp_args = mgr.create(CreateParams { agent: "mock".into(), extra_args: vec!["--x".into()], ..Default::default() }).unwrap();
+    let t = turn(&mgr, &mut rx, &acp_args.id, "ARGS", "queue", None).await;
+    assert_eq!(argv(&t), ["--x"], "ACP agents take extra_args too");
+    let unsupported = |p: CreateParams| mgr.create(p).unwrap_err().to_string();
+    let e = unsupported(CreateParams { agent: "mock".into(), instructions: Some("x".into()), ..Default::default() });
+    assert!(e.contains("does not support `instructions`"), "{e}");
+    let e = unsupported(CreateParams { agent: "mock".into(), ephemeral: true, ..Default::default() });
+    assert!(e.contains("does not support `ephemeral`"), "{e}");
+    let e = unsupported(CreateParams { agent: "mockclaude".into(), extra_args: vec!["a".into(); 65], ..Default::default() });
+    assert!(e.contains("at most 64"), "{e}");
+    let e = unsupported(CreateParams { agent: "mockclaude".into(), extra_args: vec!["a".repeat(5000)], ..Default::default() });
+    assert!(e.contains("limit is 4096"), "{e}");
+    let e = unsupported(CreateParams { agent: "mockclaude".into(), instructions: Some("a".repeat(40 * 1024)), ..Default::default() });
+    assert!(e.contains("limit is 32768"), "{e}");
+    let e = unsupported(CreateParams { agent: "mockclaude".into(), ephemeral: true, resume: Some("x".into()), ..Default::default() });
+    assert!(e.contains("cannot `resume`"), "{e}");
+    let e = unsupported(CreateParams { agent: "mockclaude".into(), extra_args: vec!["--x".into()], origin: Some(b.clone()), ..Default::default() });
+    assert!(e.contains("local connections only"), "{e}");
+
     // --- Persistence ----------------------------------------------------------
     let history = mgr.history(&r, 0, None).unwrap();
     assert!(history.iter().any(|e| matches!(&e.event, AgentEvent::TextDelta { text, .. } if text == "banana")));
