@@ -241,12 +241,12 @@ impl AcpDriver {
             let usage = state.lock().unwrap().usage.take();
             let msg = match res {
                 Ok(r) => match r["stopReason"].as_str().unwrap_or("end_turn") {
-                    "end_turn" => DriverMsg::TurnDone { outcome: "completed".into(), error: None, usage: usage.or(r.get("usage").cloned()) },
-                    "cancelled" => DriverMsg::TurnDone { outcome: "aborted".into(), error: None, usage },
-                    other => DriverMsg::TurnDone { outcome: "failed".into(), error: Some(format!("stopped: {other}")), usage },
+                    "end_turn" => DriverMsg::TurnDone { outcome: "completed".into(), error: None, usage: usage.or(r.get("usage").cloned()), text: None },
+                    "cancelled" => DriverMsg::TurnDone { outcome: "aborted".into(), error: None, usage, text: None },
+                    other => DriverMsg::TurnDone { outcome: "failed".into(), error: Some(format!("stopped: {other}")), usage, text: None },
                 },
                 Err(e) if e.to_string().contains("process exited") => return,
-                Err(e) => DriverMsg::TurnDone { outcome: "failed".into(), error: Some(clean_error(&e.to_string())), usage },
+                Err(e) => DriverMsg::TurnDone { outcome: "failed".into(), error: Some(clean_error(&e.to_string())), usage, text: None },
             };
             let _ = tx.send((gen, msg));
         });

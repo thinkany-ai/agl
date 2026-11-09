@@ -250,9 +250,12 @@ impl State {
                         })
                         .unwrap_or_else(|| f["subtype"].as_str().unwrap_or("error").to_string())
                 });
+                // `result` is the final assistant message's text.
+                let text = (!failed).then(|| f["result"].as_str().map(String::from)).flatten();
                 out.push(DriverMsg::TurnDone {
                     outcome: if failed { "failed" } else { "completed" }.into(),
                     error,
+                    text,
                     usage: Some(json!({
                         "usage": f["usage"],
                         "model_usage": f["modelUsage"],
@@ -344,6 +347,9 @@ mod tests {
         assert!(matches!(&s.map(&retry)[0], DriverMsg::Event(AgentEvent::Retrying { .. })));
 
         let failed = json!({"type": "result", "is_error": true, "result": "Credit balance is too low"});
-        assert!(matches!(&s.map(&failed)[0], DriverMsg::TurnDone { outcome, error: Some(e), .. } if outcome == "failed" && e.contains("Credit")));
+        assert!(matches!(&s.map(&failed)[0], DriverMsg::TurnDone { outcome, error: Some(e), text: None, .. } if outcome == "failed" && e.contains("Credit")));
+
+        let done = json!({"type": "result", "is_error": false, "result": "All tests pass."});
+        assert!(matches!(&s.map(&done)[0], DriverMsg::TurnDone { text: Some(t), .. } if t == "All tests pass."), "the result text is the final answer");
     }
 }

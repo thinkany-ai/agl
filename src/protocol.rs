@@ -118,6 +118,11 @@ pub enum AgentEvent {
         /// launch_ms, first_event_ms, first_text_ms, total_ms, warm
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timing: Option<Value>,
+        /// The agent's final answer for a completed turn, without interim
+        /// commentary or text written before its last tool call. Absent when
+        /// unknown or empty, and for failed / aborted turns.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
     },
     /// The agent asks before running a tool. Answer with `session.approve`.
     PermissionRequest {

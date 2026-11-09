@@ -237,7 +237,7 @@ agl does not manage.
 | `permission_resolved` | `request_id, decision, by` | `by` is one of `client`, `policy`, `session`, `timeout`, `cancelled` |
 | `heartbeat` | `turn_id, elapsed_ms, idle_ms, stalled` | Every 15s while running. `stalled` means no output for 60s. Heartbeats are not stored in history. |
 | `retrying` | `message` | The runtime is retrying a model call, or agl switched credentials |
-| `turn_ended` | `turn_id, outcome, error?, usage?, timing?` | `outcome` is `completed`, `failed` or `aborted`. `timing` is `{warm, launch_ms, first_event_ms, first_text_ms, total_ms}`. |
+| `turn_ended` | `turn_id, outcome, error?, usage?, timing?, text?` | `outcome` is `completed`, `failed` or `aborted`. `timing` is `{warm, launch_ms, first_event_ms, first_text_ms, total_ms}`. `text` (0.3.12): the turn's [final answer](#final-answer). |
 | `status` | `status` | |
 | `info` | `native_id?, model?` | |
 | `error` | `message` | Non-fatal |
@@ -258,6 +258,28 @@ Rules for clients:
   and then resume handling live events.
 - Do not treat `text_delta` as final until `turn_ended`. On `aborted`, the text
   streamed so far is partial.
+
+### Final answer
+
+From agl 0.3.12, `turn_ended.text` is the agent's final answer for a
+`completed` turn: what it would say if it were only allowed one message, with
+interim progress and commentary left out. Use it for notifications, summaries,
+or as a turn's result in an API, instead of stitching `text_delta`s together.
+The streamed `text_delta`s are unchanged and still hold everything the agent
+wrote.
+
+| agent | `text` is |
+|---|---|
+| claude | the `result` of its stream-json `result` message (the last assistant message's text) |
+| codex | the turn's `agentMessage` items that are not `phase: "commentary"` and completed after its last tool call, joined by a blank line (normally one `final_answer` message) |
+| ACP agents | the `agent_message_chunk`s after the turn's last `tool_call`, concatenated. ACP has no notion of a final message, so this is the closest generic definition: text before a tool call is the agent narrating its work. |
+| cursor, pi | likewise, the text streamed after the last tool call (cursor's and pi's final message) |
+
+Any agent: when the runtime reports nothing usable, agl falls back to the
+non-commentary `text_delta`s after the turn's last `tool_start`. Leading and
+trailing whitespace is trimmed. `text` is absent when that leaves nothing, for
+`failed` and `aborted` turns (the text so far is partial), and from agl
+before 0.3.12.
 
 ## Access levels
 

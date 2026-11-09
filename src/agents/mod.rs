@@ -238,6 +238,9 @@ pub enum DriverMsg {
         outcome: String,
         error: Option<String>,
         usage: Option<Value>,
+        /// The final answer, when the runtime reports one itself; otherwise
+        /// the session derives it from the turn's text.
+        text: Option<String>,
     },
     Exited(String),
 }

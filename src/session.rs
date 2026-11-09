@@ -720,6 +720,8 @@ struct Running {
     /// Kept so a turn that failed before doing anything can be re-run
     /// (credential fallback, lost resume id).
     prompt: String,
+    /// Answer text (not commentary) streamed since the turn's last tool call.
+    answer: String,
 }
 
 #[allow(unused_assignments)]
@@ -786,7 +788,7 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                     }
                     Cmd::Abort => {
                         for (turn_id, _) in queue.drain(..) {
-                            emit!(AgentEvent::TurnEnded { turn_id, outcome: "aborted".into(), error: Some("cancelled before start".into()), usage: None, timing: None });
+                            emit!(AgentEvent::TurnEnded { turn_id, outcome: "aborted".into(), error: Some("cancelled before start".into()), usage: None, timing: None, text: None });
                         }
                         if let Some(r) = current.as_mut() {
                             if r.aborting.is_none() {
@@ -853,14 +855,22 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                     DriverMsg::Event(e) => {
                         if let Some(r) = current.as_mut() {
                             match &e {
-                                AgentEvent::TextDelta { text, .. } => {
+                                AgentEvent::TextDelta { text, phase } => {
                                     r.activity = true;
                                     r.retrying = false;
                                     if !text.is_empty() {
                                         r.first_text_ms.get_or_insert(r.started.elapsed().as_millis() as u64);
                                     }
+                                    if phase.is_none() {
+                                        r.answer.push_str(text);
+                                    }
                                 }
-                                AgentEvent::ToolStart { .. } | AgentEvent::Reasoning { .. } => {
+                                AgentEvent::ToolStart { .. } => {
+                                    r.activity = true;
+                                    r.retrying = false;
+                                    r.answer.clear();
+                                }
+                                AgentEvent::Reasoning { .. } => {
                                     r.activity = true;
                                     r.retrying = false;
                                 }
@@ -921,7 +931,7 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                         }
                         shared.meta.lock().unwrap().pending_approvals = approvals.len();
                     }
-                    DriverMsg::TurnDone { outcome, error, usage } => {
+                    DriverMsg::TurnDone { outcome, error, usage, text } => {
                         let Some(r) = current.take() else { continue };
                         cancel_approvals(&mgr, &shared, &mut approvals);
                         let (agent, use_login, native) = {
@@ -965,13 +975,14 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                             m.last_active_at = now_ms();
                         }
                         let t = timing(&r);
+                        let text = final_text(&outcome, text, &r.answer);
                         // Observers acting on turn_ended must already see the
                         // session as idle; the status event still follows it.
                         let idle = queue.is_empty();
                         if idle {
                             shared.meta.lock().unwrap().status = "idle".into();
                         }
-                        emit!(AgentEvent::TurnEnded { turn_id: r.turn_id, outcome, error, usage, timing: Some(t) });
+                        emit!(AgentEvent::TurnEnded { turn_id: r.turn_id, outcome, error, usage, timing: Some(t), text });
                         if idle {
                             emit!(AgentEvent::Status { status: "idle".into() });
                         }
@@ -991,7 +1002,7 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                                 ("failed".to_string(), Some(if reason.is_empty() { "agent process exited".to_string() } else { format!("agent process exited: {reason}") }))
                             };
                             let t = timing(&r);
-                        emit!(AgentEvent::TurnEnded { turn_id: r.turn_id, outcome, error, usage: None, timing: Some(t) });
+                        emit!(AgentEvent::TurnEnded { turn_id: r.turn_id, outcome, error, usage: None, timing: Some(t), text: None });
                             save_history(&shared);
                         }
                         mgr.set_status(&shared, "suspended");
@@ -1040,7 +1051,7 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                     if let Some(r) = current.take() {
                         let (outcome, error) = if reason.is_empty() { ("aborted".to_string(), None) } else { ("failed".to_string(), Some(reason)) };
                         let t = timing(&r);
-                        emit!(AgentEvent::TurnEnded { turn_id: r.turn_id, outcome, error, usage: None, timing: Some(t) });
+                        emit!(AgentEvent::TurnEnded { turn_id: r.turn_id, outcome, error, usage: None, timing: Some(t), text: None });
                         save_history(&shared);
                     }
                     mgr.set_status(&shared, "suspended");
@@ -1099,7 +1110,7 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                     Err(e) => {
                         permit = None;
                         if let Some((turn_id, _)) = queue.pop_front() {
-                            emit!(AgentEvent::TurnEnded { turn_id, outcome: "failed".into(), error: Some(format!("{e:#}")), usage: None, timing: None });
+                            emit!(AgentEvent::TurnEnded { turn_id, outcome: "failed".into(), error: Some(format!("{e:#}")), usage: None, timing: None, text: None });
                         } else {
                             emit!(AgentEvent::Error { message: format!("warm-up failed: {e:#}") });
                         }
@@ -1129,9 +1140,10 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                         activity: false,
                         aborting: None,
                         prompt: text,
+                        answer: String::new(),
                     })
                 }
-                Err(e) => emit!(AgentEvent::TurnEnded { turn_id, outcome: "failed".into(), error: Some(format!("{e:#}")), usage: None, timing: None }),
+                Err(e) => emit!(AgentEvent::TurnEnded { turn_id, outcome: "failed".into(), error: Some(format!("{e:#}")), usage: None, timing: None, text: None }),
             }
         }
         if current.is_none() && driver.is_some() && approvals.is_empty() {
@@ -1146,6 +1158,18 @@ fn cancel_approvals(mgr: &Manager, shared: &Shared, approvals: &mut HashMap<Stri
         mgr.emit(shared, AgentEvent::PermissionResolved { request_id: id, decision: "deny".into(), by: "cancelled".into() });
     }
     shared.meta.lock().unwrap().pending_approvals = 0;
+}
+
+/// `turn_ended.text`: what the runtime reported as its answer, else the
+/// answer text streamed after the turn's last tool call; only for a
+/// completed turn, and never empty.
+fn final_text(outcome: &str, reported: Option<String>, streamed: &str) -> Option<String> {
+    if outcome != "completed" {
+        return None;
+    }
+    let text = reported.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| streamed.to_string());
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 fn timing(r: &Running) -> Value {
@@ -1179,6 +1203,16 @@ mod tests {
             "created_at": 0, "last_active_at": 0, "origin": origin,
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn final_text_prefers_the_runtime_and_needs_a_completed_turn() {
+        assert_eq!(final_text("completed", Some("Done.".into()), "partial"), Some("Done.".into()));
+        assert_eq!(final_text("completed", None, "\n\nAll set.\n"), Some("All set.".into()));
+        assert_eq!(final_text("completed", Some("  ".into()), "streamed"), Some("streamed".into()));
+        assert_eq!(final_text("completed", None, " "), None);
+        assert_eq!(final_text("failed", Some("x".into()), "x"), None);
+        assert_eq!(final_text("aborted", None, "half"), None);
     }
 
     #[test]

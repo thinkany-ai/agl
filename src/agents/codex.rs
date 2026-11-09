@@ -32,6 +32,8 @@ struct TurnState {
     limit: usize,
     /// Agent message ids Codex marked `phase: commentary` (interim updates).
     commentary: std::collections::HashSet<String>,
+    /// Answer messages (not commentary) completed since the turn's last tool call.
+    answer: Vec<String>,
 }
 
 enum Approval {
@@ -210,6 +212,7 @@ impl CodexDriver {
             let mut s = self.state.lock().unwrap();
             s.last_error = None;
             s.wrote_text = false;
+            s.answer.clear();
         }
         let res = self
             .peer
@@ -367,6 +370,7 @@ fn map_notification(method: &str, p: &Value, state: &Arc<Mutex<TurnState>>) -> V
             if !TOOL_ITEMS.contains(&ty) {
                 return vec![];
             }
+            s.answer.clear();
             let (name, input) = match ty {
                 "commandExecution" => ("shell".to_string(), json!({"command": item["command"], "cwd": item["cwd"]})),
                 "fileChange" => ("edit".to_string(), json!({"changes": item["changes"]})),
@@ -386,6 +390,13 @@ fn map_notification(method: &str, p: &Value, state: &Arc<Mutex<TurnState>>) -> V
         "item/completed" => {
             let item = &p["item"];
             let ty = item["type"].as_str().unwrap_or_default();
+            if ty == "agentMessage" {
+                let commentary = item["phase"].as_str() == Some("commentary") || item["id"].as_str().is_some_and(|id| s.commentary.contains(id));
+                if let (false, Some(text)) = (commentary, item["text"].as_str().filter(|t| !t.trim().is_empty())) {
+                    s.answer.push(text.to_string());
+                }
+                return vec![];
+            }
             if !TOOL_ITEMS.contains(&ty) {
                 return vec![];
             }
@@ -457,7 +468,9 @@ fn map_notification(method: &str, p: &Value, state: &Arc<Mutex<TurnState>>) -> V
                 Some("interrupted") => ("aborted", None),
                 _ => ("failed", turn["error"]["message"].as_str().map(String::from).or(s.last_error.take())),
             };
-            vec![DriverMsg::TurnDone { outcome: outcome.into(), error, usage: s.usage.take() }]
+            let answer = std::mem::take(&mut s.answer);
+            let text = (outcome == "completed" && !answer.is_empty()).then(|| answer.join("\n\n"));
+            vec![DriverMsg::TurnDone { outcome: outcome.into(), error, usage: s.usage.take(), text }]
         }
         _ => vec![],
     }
@@ -657,6 +670,28 @@ standalone_web_search                    under development  false\n";
         map_notification("thread/tokenUsage/updated", &json!({"threadId": "t1", "tokenUsage": {"total": 5}}), &s);
         let end = map_notification("turn/completed", &json!({"threadId": "t1", "turn": {"id": "u1", "status": "completed"}}), &s);
         assert!(matches!(&end[0], DriverMsg::TurnDone { outcome, usage: Some(_), .. } if outcome == "completed"));
+    }
+
+    #[test]
+    fn final_answer_skips_commentary_and_text_before_tools() {
+        let s = state();
+        let msg = |id: &str, phase: Value, text: &str| json!({"threadId": "t1", "item": {"type": "agentMessage", "id": id, "phase": phase, "text": text}});
+        // Commentary announced at start, its completed item without a phase.
+        map_notification("item/started", &json!({"threadId": "t1", "item": {"type": "agentMessage", "id": "c1", "phase": "commentary"}}), &s);
+        map_notification("item/completed", &msg("c1", Value::Null, "I'll look at the tests first."), &s);
+        map_notification("item/completed", &msg("m0", Value::Null, "Old answer before a tool."), &s);
+        let tool = json!({"type": "commandExecution", "id": "x1", "command": "ls", "cwd": "/"});
+        map_notification("item/started", &json!({"threadId": "t1", "item": tool}), &s);
+        map_notification("item/completed", &msg("c2", json!("commentary"), "Almost done."), &s);
+        map_notification("item/completed", &msg("m1", json!("final_answer"), "Fixed the test."), &s);
+        let end = map_notification("turn/completed", &json!({"threadId": "t1", "turn": {"status": "completed"}}), &s);
+        assert!(matches!(&end[0], DriverMsg::TurnDone { text: Some(t), .. } if t == "Fixed the test."));
+
+        let end = map_notification("turn/completed", &json!({"threadId": "t1", "turn": {"status": "completed"}}), &s);
+        assert!(matches!(&end[0], DriverMsg::TurnDone { text: None, .. }), "nothing left over from the last turn");
+        map_notification("item/completed", &msg("m2", Value::Null, "partial"), &s);
+        let end = map_notification("turn/completed", &json!({"threadId": "t1", "turn": {"status": "interrupted"}}), &s);
+        assert!(matches!(&end[0], DriverMsg::TurnDone { text: None, .. }), "no answer for an aborted turn");
     }
 
     #[test]

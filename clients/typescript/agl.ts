@@ -38,7 +38,8 @@ export type AgentEvent =
   | { kind: "permission_resolved"; request_id: string; decision: Decision; by: "client" | "policy" | "timeout" | "cancelled" }
   | { kind: "heartbeat"; turn_id: string; elapsed_ms: number; idle_ms: number; stalled: boolean }
   | { kind: "retrying"; message: string }
-  | { kind: "turn_ended"; turn_id: string; outcome: "completed" | "failed" | "aborted"; error?: string; usage?: unknown; timing?: Timing }
+  /** `text` (agl 0.3.12+): the final answer of a completed turn, without interim commentary. */
+  | { kind: "turn_ended"; turn_id: string; outcome: "completed" | "failed" | "aborted"; error?: string; usage?: unknown; timing?: Timing; text?: string }
   | { kind: "info"; native_id?: string; model?: string }
   | { kind: "error"; message: string };
 
@@ -71,7 +72,11 @@ export interface AgentInfo {
 
 export interface CreateSession { agent: string; cwd?: string; model?: string; effort?: string; access?: Access; name?: string; resume?: string; warm?: boolean }
 
-export interface TurnResult { turn_id: string; outcome: "completed" | "failed" | "aborted"; error?: string; usage?: unknown; timing?: Timing; text: string }
+/**
+ * `text`: every non-commentary `text_delta` of the turn. `answer`: the final
+ * answer agl reported on `turn_ended` (agl 0.3.12+), else undefined.
+ */
+export interface TurnResult { turn_id: string; outcome: "completed" | "failed" | "aborted"; error?: string; usage?: unknown; timing?: Timing; text: string; answer?: string }
 
 type Listener = (e: EventEnvelope) => void;
 
@@ -229,7 +234,7 @@ export class AglClient {
         if (e.kind === "turn_ended" && e.turn_id === turnId) {
           off();
           o.onEvent?.(e);
-          return resolve({ turn_id: turnId, outcome: e.outcome, error: e.error, usage: e.usage, timing: e.timing, text: reply });
+          return resolve({ turn_id: turnId, outcome: e.outcome, error: e.error, usage: e.usage, timing: e.timing, text: reply, answer: e.text });
         }
         if (!started) return;
         if (e.kind === "text_delta" && e.phase !== "commentary") reply += e.text;

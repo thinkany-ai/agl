@@ -8,6 +8,7 @@ Prompt keywords:
   REMEMBER  REMEMBER <word> stores a word for the session (persisted, so
             resume can be tested across processes)
   RECALL    answers with the remembered word
+  ANSWER    "Looking." then a tool call, then "Final answer."
   anything else: "echo: <prompt>" in two chunks
 State lives in $MOCK_STATE_DIR (one file per session id).
 """
@@ -73,6 +74,13 @@ def prompt(rid, p):
         update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed" if allowed else "failed",
                      "content": [{"type": "content", "content": {"type": "text", "text": "touched" if allowed else "rejected"}}]})
         chunk(sid, "allowed" if allowed else "denied")
+    elif "ANSWER" in text:
+        chunk(sid, "Looking.")
+        update(sid, {"sessionUpdate": "tool_call", "toolCallId": "a1", "title": "read", "kind": "read", "status": "in_progress"})
+        update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "a1", "status": "completed",
+                     "content": [{"type": "content", "content": {"type": "text", "text": "data"}}]})
+        chunk(sid, "Final ")
+        chunk(sid, "answer.")
     elif "SLOW" in text:
         for i in range(150):
             if sid in cancelled:

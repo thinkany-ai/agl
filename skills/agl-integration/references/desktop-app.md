@@ -65,6 +65,7 @@ valid token.
 | stop button | `session.abort` |
 | send while running | `session.prompt {mode: "steer"}` if the session has the `steer` feature, else `"queue"` |
 | tool approval dialog | `permission_request` → `session.approve` |
+| "done" notification, thread preview, the answer you store | `turn_ended.text`: the final answer without interim commentary (agl 0.3.12+) |
 
 ### Packaging
 

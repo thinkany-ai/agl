@@ -113,14 +113,14 @@ impl OneShotDriver {
                 }
             }
             let msg = match status {
-                None => DriverMsg::TurnDone { outcome: "aborted".into(), error: None, usage: turn.usage },
-                Some(s) if s.success() && turn.error.is_none() => DriverMsg::TurnDone { outcome: "completed".into(), error: None, usage: turn.usage },
+                None => DriverMsg::TurnDone { outcome: "aborted".into(), error: None, usage: turn.usage, text: None },
+                Some(s) if s.success() && turn.error.is_none() => DriverMsg::TurnDone { outcome: "completed".into(), error: None, usage: turn.usage, text: None },
                 Some(s) => {
                     let err = turn.error.unwrap_or_else(|| {
                         let tail = tail.lock().unwrap().join("\n");
                         if tail.is_empty() { format!("exited with {s}") } else { tail }
                     });
-                    DriverMsg::TurnDone { outcome: "failed".into(), error: Some(err), usage: turn.usage }
+                    DriverMsg::TurnDone { outcome: "failed".into(), error: Some(err), usage: turn.usage, text: None }
                 }
             };
             let _ = tx.send((gen, msg));

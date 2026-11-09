@@ -17,6 +17,8 @@ struct Turn {
     text: String,
     events: Vec<AgentEvent>,
     timing: Option<Value>,
+    /// `turn_ended.text`
+    answer: Option<String>,
 }
 
 fn fixture(name: &str) -> String {
@@ -56,7 +58,7 @@ fn create(mgr: &Arc<Manager>, agent: &str, access: &str, origin: Option<Origin>)
 async fn turn(mgr: &Arc<Manager>, rx: &mut Receiver<EventEnvelope>, sid: &str, text: &str, mode: &str, decision: Option<&str>) -> Turn {
     let r = mgr.prompt(sid, text.into(), Some(mode), None).expect("prompt");
     let turn_id = r["turn_id"].as_str().unwrap().to_string();
-    let mut t = Turn { outcome: String::new(), text: String::new(), events: vec![], timing: None };
+    let mut t = Turn { outcome: String::new(), text: String::new(), events: vec![], timing: None, answer: None };
     let mut started = false;
     let fut = async {
         loop {
@@ -72,9 +74,10 @@ async fn turn(mgr: &Arc<Manager>, rx: &mut Receiver<EventEnvelope>, sid: &str, t
                         mgr.approve(sid, request_id, d).await.expect("approve");
                     }
                 }
-                AgentEvent::TurnEnded { turn_id: id, outcome, timing, .. } if *id == turn_id => {
+                AgentEvent::TurnEnded { turn_id: id, outcome, timing, text, .. } if *id == turn_id => {
                     t.outcome = outcome.clone();
                     t.timing = timing.clone();
+                    t.answer = text.clone();
                     t.events.push(env.event.clone());
                     return;
                 }
@@ -114,7 +117,11 @@ async fn sessions_end_to_end() {
     let s = create(&mgr, "mock", "full", None);
     let t = turn(&mgr, &mut rx, &s, "hi", "queue", None).await;
     assert_eq!((t.outcome.as_str(), t.text.as_str()), ("completed", "echo: hi"));
+    assert_eq!(t.answer.as_deref(), Some("echo: hi"), "turn_ended carries the final answer");
     assert!(has(&t.events, |e| matches!(e, AgentEvent::Plan { .. })));
+    let t = turn(&mgr, &mut rx, &s, "ANSWER", "queue", None).await;
+    assert!(t.text.starts_with("Looking."));
+    assert_eq!(t.answer.as_deref(), Some("Final answer."), "only the text after the last tool call");
     let t = turn(&mgr, &mut rx, &s, "again", "queue", None).await;
     assert_eq!(t.timing.as_ref().unwrap()["warm"], true, "second turn reuses the process");
     let meta = mgr.get(&s).unwrap();
@@ -161,6 +168,11 @@ async fn sessions_end_to_end() {
     .await
     .expect("abort took too long");
     assert_eq!(ended, "aborted");
+    let ended_text = mgr.history(&q, 0, None).unwrap().into_iter().find_map(|e| match e.event {
+        AgentEvent::TurnEnded { turn_id, text, .. } if turn_id == slow_id => Some(text),
+        _ => None,
+    });
+    assert_eq!(ended_text, Some(None), "an aborted turn has no final answer");
 
     // --- Suspension and native resume keep the conversation -----------------
     let r = create(&mgr, "mock", "full", None);
@@ -202,6 +214,7 @@ async fn sessions_end_to_end() {
     let c = create(&mgr, "mockclaude", "ask", None);
     let t = turn(&mgr, &mut rx, &c, "hello", "queue", None).await;
     assert_eq!((t.outcome.as_str(), t.text.as_str()), ("completed", "echo: hello"));
+    assert_eq!(t.answer.as_deref(), Some("echo: hello"), "claude's `result`");
     let t = turn(&mgr, &mut rx, &c, "TOOL", "queue", Some("allow")).await;
     assert_eq!(t.text, "allow");
     assert!(has(&t.events, |e| matches!(e, AgentEvent::ToolStart { name, .. } if name == "Bash")));

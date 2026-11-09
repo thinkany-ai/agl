@@ -54,6 +54,7 @@ Replace only the **execution layer**: the code that spawns `claude`, `codex`,
    | `tool_end` | `tool_end {id, output, isError: !ok}` |
    | `heartbeat` | `status {stage: stalled ? "stalled" : "working"}` |
    | `turn_ended.timing` | your timing metrics |
+   | `turn_ended.text` | the turn's final answer (`result`), without interim commentary |
 
 5. **Keep your other drivers.** Route the agents agl supports through agl and
    leave the rest on your existing runners. Check `agents.list` /
