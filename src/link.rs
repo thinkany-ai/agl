@@ -205,7 +205,7 @@ async fn connect_once(d: &Arc<Daemon>, link: &HubLink, kind: &str, secret: &str)
             ev = bus.recv() => match ev {
                 Ok(env) => {
                     // Only the sessions this hub may see.
-                    if d.mgr.origin_of(&env.session_id).map(|o| origin.sees(&o)).unwrap_or(false) {
+                    if d.mgr.visible_to(&env.session_id, &origin) {
                         sink.send(Message::Text(WireMsg::Event(env).to_json().into())).await?;
                     }
                 }

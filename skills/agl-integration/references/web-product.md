@@ -66,7 +66,8 @@ After `hello`, your backend:
   **your hub may see**: the ones it created, plus the user's local ones
   (terminal, desktop apps) unless the machine was linked with
   `agl connect --private`. Sessions created by other web apps the same
-  machine is linked to are never visible to you.
+  machine is linked to are never visible to you, nor are local sessions an
+  app created with `visibility: "local"`.
 
 Over HTTP (`agl connect --transport http`), the same messages travel as
 `POST /machine/send` and long-polled `POST /machine/poll` calls; see

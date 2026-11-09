@@ -182,6 +182,22 @@ async fn sessions_end_to_end() {
     assert!(mgr.resolve_for(&s, &b).is_ok(), "share_local exposes local sessions");
     assert!(mgr.resolve_for(&s, &a).is_err(), "private hubs do not see local sessions");
 
+    // A `local` session is hidden from every hub, share_local or not.
+    let hidden = mgr
+        .create(CreateParams { agent: "mock".into(), name: Some("hidden".into()), visibility: Some("local".into()), ..Default::default() })
+        .unwrap();
+    assert_eq!(hidden.visibility, "local");
+    assert!(mgr.resolve_for(&hidden.id, &b).is_err(), "share_local does not expose a local session");
+    assert!(mgr.resolve_for("hidden", &b).is_err(), "not by name either");
+    assert!(!mgr.visible_to(&hidden.id, &b), "its events are not forwarded");
+    assert!(mgr.resolve_for(&hidden.id, &Origin::Local).is_ok());
+    let reuse = mgr.create(CreateParams { agent: "mock".into(), name: Some("hidden".into()), origin: Some(b.clone()), ..Default::default() });
+    assert!(reuse.unwrap_err().to_string().contains("in use"), "a hub cannot reuse it by name");
+    let from_hub = mgr.create(CreateParams { agent: "mock".into(), visibility: Some("local".into()), origin: Some(b.clone()), ..Default::default() });
+    assert!(from_hub.unwrap_err().to_string().contains("cannot create a `local` session"));
+    assert!(mgr.create(CreateParams { agent: "mock".into(), visibility: Some("secret".into()), ..Default::default() }).is_err());
+    assert_eq!(mgr.get(&s).unwrap().visibility, "shared", "the default");
+
     // --- Claude stream-json driver ------------------------------------------
     let c = create(&mgr, "mockclaude", "ask", None);
     let t = turn(&mgr, &mut rx, &c, "hello", "queue", None).await;

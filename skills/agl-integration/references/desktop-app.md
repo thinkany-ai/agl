@@ -141,6 +141,10 @@ closed.
    `agl service install` for autostart).
 3. Prefix session names with your app id so they don't collide with terminal
    sessions.
+4. Create sessions that must stay on this computer (private chats, anything
+   the user did not mean to share with a linked web product) with
+   `visibility: "local"`: no hub link sees them, even when the machine was
+   linked with `share_local`.
 
 When the app also links the machine to your web product (the same link the
 `curl … | sh` install makes, see [web-product.md](web-product.md)), let both

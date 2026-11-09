@@ -78,6 +78,10 @@ pub struct SessionMeta {
     /// Who created it: `local`, or the URL of the hub that did.
     #[serde(default = "local_origin")]
     pub origin: String,
+    /// `shared` (default): visible to the hubs `origin` allows. `local`: never
+    /// visible to any hub link, whatever `share_local` says.
+    #[serde(default = "shared_visibility")]
+    pub visibility: String,
 }
 
 fn default_access() -> String {
@@ -87,6 +91,12 @@ fn default_access() -> String {
 fn local_origin() -> String {
     "local".into()
 }
+
+fn shared_visibility() -> String {
+    "shared".into()
+}
+
+pub const VISIBILITIES: &[&str] = &["shared", "local"];
 
 /// Where a request comes from. A hub sees the sessions it created, plus
 /// local ones if it was linked with `share_local`; local clients see all.
@@ -108,6 +118,15 @@ impl Origin {
         match self {
             Origin::Local => true,
             Origin::Hub { url, share_local } => session_origin == url || (*share_local && session_origin == "local"),
+        }
+    }
+
+    /// Whether this caller may see the session: its origin allows it, and a
+    /// `local` session is seen by local clients only.
+    pub fn can_see(&self, m: &SessionMeta) -> bool {
+        match self {
+            Origin::Local => true,
+            Origin::Hub { .. } => m.visibility != "local" && self.sees(&m.origin),
         }
     }
 }
@@ -168,6 +187,9 @@ pub struct CreateParams {
     /// Start the agent process now so the first prompt is warm.
     #[serde(default)]
     pub warm: bool,
+    /// shared (default) | local: a `local` session is never visible to a hub.
+    #[serde(default)]
+    pub visibility: Option<String>,
     /// Set by the dispatcher, never by the caller.
     #[serde(skip)]
     pub origin: Option<Origin>,
@@ -243,10 +265,16 @@ impl Manager {
     /// Resolve a session the caller may see; invisible ones do not exist for it.
     pub fn resolve_for(&self, key: &str, origin: &Origin) -> Result<String> {
         let id = self.resolve(key).ok_or_else(|| anyhow!("no session `{key}`"))?;
-        match self.origin_of(&id) {
-            Some(o) if origin.sees(&o) => Ok(id),
-            _ => bail!("no session `{key}`"),
+        if self.visible_to(&id, origin) {
+            Ok(id)
+        } else {
+            bail!("no session `{key}`")
         }
+    }
+
+    /// Whether `origin` may see the session `id` (and receive its events).
+    pub fn visible_to(&self, id: &str, origin: &Origin) -> bool {
+        self.sessions.lock().unwrap().get(id).map(|h| origin.can_see(&h.shared.meta.lock().unwrap())).unwrap_or(false)
     }
 
     pub fn origin_of(&self, id: &str) -> Option<String> {
@@ -291,11 +319,18 @@ impl Manager {
             bail!("access must be one of {}", ACCESS_LEVELS.join(", "));
         }
         let origin = p.origin.clone().unwrap_or(Origin::Local);
+        let visibility = p.visibility.clone().unwrap_or_else(shared_visibility);
+        if !VISIBILITIES.contains(&visibility.as_str()) {
+            bail!("visibility must be one of {}", VISIBILITIES.join(", "));
+        }
+        if visibility == "local" && origin != Origin::Local {
+            bail!("a hub cannot create a `local` session: it would be hidden from that hub too");
+        }
         if let Some(name) = &p.name {
             if let Some(id) = self.resolve(name) {
                 let (_, shared, tx) = self.handle(&id)?;
                 let meta = shared.meta.lock().unwrap().clone();
-                if !origin.sees(&meta.origin) {
+                if !origin.can_see(&meta) {
                     bail!("session name `{name}` is in use");
                 }
                 if meta.agent != p.agent {
@@ -336,6 +371,7 @@ impl Manager {
             features: def.protocol.features(),
             use_login: false,
             origin: origin.tag(),
+            visibility,
         };
         let shared = self.start_actor(meta.clone());
         if p.warm {

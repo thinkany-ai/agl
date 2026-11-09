@@ -333,7 +333,7 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
                 "home": if local { json!(config::home()) } else { Value::Null },
                 "machine_id": cfg.machine_id,
                 "hubs": hubs,
-                "sessions": mgr.list().iter().filter(|m| origin.sees(&m.origin)).count(),
+                "sessions": mgr.list().iter().filter(|m| origin.can_see(m)).count(),
                 // Sessions with a turn running, starting, waiting or queued.
                 "busy": mgr.list().iter().filter(|m| !crate::session::is_idle(m)).count(),
                 // Started by the autostart service (which restarts it), not `agl start`.
@@ -419,7 +419,7 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
             json!({"ok": true})
         }
         "session.get" => serde_json::to_value(mgr.get(&sid()?)?)?,
-        "session.list" => serde_json::to_value(mgr.list().into_iter().filter(|m| origin.sees(&m.origin)).collect::<Vec<_>>())?,
+        "session.list" => serde_json::to_value(mgr.list().into_iter().filter(|m| origin.can_see(m)).collect::<Vec<_>>())?,
         "session.history" => {
             let after = params["after_seq"].as_u64().unwrap_or(0);
             let limit = params["limit"].as_u64().map(|n| n as usize);

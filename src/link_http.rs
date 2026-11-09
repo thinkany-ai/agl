@@ -336,7 +336,7 @@ async fn next_out(
             m = out.recv() => return m.context("link closed"),
             ev = bus.recv() => match ev {
                 // Only the sessions this hub may see.
-                Ok(env) => if d.mgr.origin_of(&env.session_id).map(|o| origin.sees(&o)).unwrap_or(false) {
+                Ok(env) => if d.mgr.visible_to(&env.session_id, origin) {
                     return Ok(WireMsg::Event(env));
                 },
                 Err(broadcast::error::RecvError::Lagged(n)) => eprintln!("hub link: dropped {n} events"),

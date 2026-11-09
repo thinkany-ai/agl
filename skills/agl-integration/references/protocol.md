@@ -97,6 +97,18 @@ Sessions a hub may not see do not exist for it: methods answer `no session`,
 hub's link. Sessions a hub creates without naming `access` get the link's
 access (default `ask`).
 
+**Local-only sessions** (from agl 0.3.12). A local client can create a session
+with `visibility: "local"`: no hub link ever sees it, whatever `share_local`
+says. It is left out of `session.list` and `daemon.status` counts, its events
+are never sent on any link, and every hub request naming it (by id, name or
+prefix) answers `no session` exactly like an unknown one; a hub that tries to
+create a session under its name gets `session name … is in use`, as for any
+session it may not see. The visibility is stored with the session (it
+survives a daemon restart) and cannot be changed later. A hub cannot create
+one: `visibility: "local"` from a hub link is rejected (`a hub cannot create a
+local session: it would be hidden from that hub too`), since the session would
+vanish for its own creator; `"shared"` (the default) is accepted.
+
 ## Local-only methods
 
 | method | params | result |
@@ -116,12 +128,13 @@ access (default `ask`).
 | `agents.models` | `{agent}` | `{agent, models: [{id, name, description?, default?, efforts?[]}]}`. Never starts a conversation the user would see. |
 | `daemon.status` | – | Version, protocol, pid, port, `hubs: [{url, status, access, share_local}]` (a hub sees only its own entry), visible sessions, `busy` (sessions with a turn running or queued, from agl 0.3.2), `managed` (started by the autostart service, which restarts it; from 0.3.8), live processes, defaults |
 | `daemon.update` | `{if_idle?}` | From agl 0.3.2. Updates agl to the newest release (checked against its sha256) and restarts the daemon on it: `{updated, current, latest, busy?, busy_elsewhere?}`. With `if_idle`, nothing happens while a session runs a turn (`busy`). A restart ends running turns, so a hub never ends another's: while a session the hub did not create (another hub's, or a local one) runs a turn, nothing happens even without `if_idle` (`busy_elsewhere`, also counted in `busy`). Any hub link may call it (from agl 0.3.5; before, `full` only): it installs only the official release, never a binary the hub picks. Below `full`, the update always behaves as `if_idle`; the link comes back by itself. The new daemon is started by the autostart service when it runs this daemon, otherwise by agl itself (before 0.3.8 an installed but idle service unit made agl skip that, and the daemon stayed down). Under launchd agl also kickstarts the job, since launchd may defer a KeepAlive respawn, and even a RunAtLoad start after `agl service install`, indefinitely (0.3.9 / 0.3.10). An agl inside an app bundle is updated with the app instead. |
-| `session.create` | `{agent, cwd?, model?, effort?, access?, name?, resume?, warm?}` | `SessionMeta`. Details: |
+| `session.create` | `{agent, cwd?, model?, effort?, access?, name?, resume?, warm?, visibility?}` | `SessionMeta`. Details: |
 | | | `name`: if a session with that name exists (and is visible to the caller), it is reused. |
 | | | `access`: when omitted, the config's `default_access` for local callers, the link's `access` (default `ask`) for a hub. |
 | | | `resume`: attaches a native id. |
 | | | `warm`: starts the process now (only takes a free slot). |
 | | | `cwd` defaults to the home directory, and `~/` is expanded. |
+| | | `visibility` (0.3.12): `shared` (default) or `local`, which hides the session from every hub link; see [Visibility](#visibility-one-machine-several-hubs). Local clients only. |
 | `session.prompt` | `{session_id, text, mode?, turn_id?}` | `{session_id, turn_id}`, returned as soon as the prompt is accepted. `mode`: |
 | | | `queue` (default): run after the current turn. |
 | | | `steer`: inject into the running turn (claude, codex); otherwise falls back to queue. |
@@ -161,7 +174,7 @@ Hub-level methods take no `machine_id`:
 {
   "id": "8b6d5cf21266", "name": "web-demo", "agent": "claude", "cwd": "/Users/me/proj",
   "model": "haiku", "current_model": "claude-haiku-5-5", "effort": null, "access": "ask",
-  "native_id": "6f0c…", "origin": "local",
+  "native_id": "6f0c…", "origin": "local", "visibility": "shared",
   "status": "idle", "created_at": 1792559001027, "last_active_at": 1792559009456,
   "turns": 3, "queued": 0, "live": true, "pending_approvals": 0,
   "features": ["warm", "approvals", "steer", "interrupt", "models", "effort"]
@@ -170,6 +183,8 @@ Hub-level methods take no `machine_id`:
 
 `model` is what was asked for (null = the agent's default); `current_model`
 is what the runtime reported running. `origin` is `local` or a hub URL.
+`visibility` is `shared` or `local` (from 0.3.12; absent before, read it as
+`shared`).
 
 `status` values:
 
