@@ -424,6 +424,11 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
                     p.access = Some(mgr.cfg().hub(url).map(|h| h.access.clone()).unwrap_or_else(|| "ask".into()));
                 }
             }
+            if p.app_name.is_none() {
+                if let Origin::Hub { url, .. } = origin {
+                    p.app_name = mgr.cfg().hub(url).and_then(|h| h.app_name.clone());
+                }
+            }
             p.origin = Some(origin.clone());
             serde_json::to_value(for_caller(mgr.create(p)?, origin))?
         }

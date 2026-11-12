@@ -74,7 +74,14 @@ pub async fn dispatch(cfg: &Config, origin: &Origin, method: &str, params: Value
     match method {
         "fs.read" => read(params).await,
         "fs.write" => write(params).await,
-        "exec" => exec(params).await,
+        "exec" => {
+            // A hub's commands are its product's, as its sessions are.
+            let link_app = match origin {
+                Origin::Hub { url, .. } => cfg.hub(url).and_then(|h| h.app_name.clone()),
+                Origin::Local => None,
+            };
+            exec(params, link_app).await
+        }
         other => Err(anyhow!("unknown method `{other}`")),
     }
 }
@@ -131,19 +138,28 @@ struct ExecParams {
     #[serde(default)]
     env: std::collections::HashMap<String, String>,
     stdin: Option<String>,
+    /// The product the command runs for (macOS privacy prompts name it).
+    app_name: Option<String>,
 }
 
 /// Run `argv` (no shell) with the agents' environment, in its own process
 /// group, killed with everything it started on timeout.
-async fn exec(params: Value) -> Result<Value> {
+async fn exec(params: Value, link_app: Option<String>) -> Result<Value> {
     let p: ExecParams = serde_json::from_value(params).context("exec params")?;
+    let app_name = match p.app_name.as_deref().or(link_app.as_deref()) {
+        Some(n) => crate::app::validate(n)?,
+        None => None,
+    };
     let Some(program) = p.argv.first() else { bail!("argv is empty") };
     let cwd = match &p.cwd {
         Some(c) => resolve(c)?,
         None => dirs::home_dir().context("no home directory")?,
     };
     let timeout = p.timeout_ms.map(Duration::from_millis).unwrap_or(EXEC_TIMEOUT_DEFAULT).min(EXEC_TIMEOUT_MAX);
-    let mut cmd = tokio::process::Command::new(crate::shellenv::which(program).unwrap_or_else(|| PathBuf::from(program)));
+    let bin = crate::shellenv::which(program).unwrap_or_else(|| PathBuf::from(program));
+    let (launch, pre_args) = crate::app::wrap(&bin, app_name.as_deref());
+    let mut cmd = tokio::process::Command::new(launch);
+    cmd.args(pre_args);
     crate::shellenv::apply(&mut cmd);
     cmd.args(&p.argv[1..])
         .envs(&p.env)
@@ -251,9 +267,9 @@ mod tests {
         write(json!({"path": path, "content_base64": data})).await.unwrap();
         let r = read(json!({"path": path})).await.unwrap();
         assert_eq!(r["content_base64"], data);
-        let r = exec(json!({"argv": ["sh", "-c", "cat b.txt; echo oops >&2; exit 3"], "cwd": dir.join("a").to_str().unwrap()})).await.unwrap();
+        let r = exec(json!({"argv": ["sh", "-c", "cat b.txt; echo oops >&2; exit 3"], "cwd": dir.join("a").to_str().unwrap()}), None).await.unwrap();
         assert_eq!((r["stdout"].as_str(), r["stderr"].as_str(), r["exit_code"].as_i64()), (Some("hello"), Some("oops\n"), Some(3)));
-        let r = exec(json!({"argv": ["sleep", "5"], "timeout_ms": 200})).await.unwrap();
+        let r = exec(json!({"argv": ["sleep", "5"], "timeout_ms": 200}), None).await.unwrap();
         assert_eq!(r["timed_out"], true);
         let _ = std::fs::remove_dir_all(dir);
     }

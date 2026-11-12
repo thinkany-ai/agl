@@ -272,6 +272,9 @@ pub struct SpawnSpec {
     /// A metadata probe nobody is watching: it must not open anything on the
     /// user's screen (`no_browser_dir`).
     pub unattended: bool,
+    /// The product the agent runs for: macOS privacy prompts name it
+    /// instead of agl (see `crate::app`).
+    pub app_name: Option<String>,
 }
 
 /// A throwaway spec for metadata probes (model lists).
@@ -290,6 +293,7 @@ pub(crate) fn probe_spec(id: &str, protocol: Protocol) -> SpawnSpec {
         instructions: None,
         ephemeral: false,
         unattended: true,
+        app_name: None,
     }
 }
 
@@ -566,7 +570,9 @@ where
 
 /// Common process setup: agent env, own process group, piped stdio.
 pub(crate) fn base_command(bin: &std::path::Path, spec: &SpawnSpec) -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new(bin);
+    let (program, pre_args) = crate::app::wrap(bin, spec.app_name.as_deref());
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(pre_args);
     shellenv::apply(&mut cmd);
     let quiet = if spec.unattended { no_browser_dir() } else { None };
     let extra: Vec<PathBuf> = quiet.into_iter().chain(bundled_path_dirs(bin)).collect();

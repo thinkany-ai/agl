@@ -101,6 +101,10 @@ pub struct SessionMeta {
     /// cannot be resumed natively once its process stops.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ephemeral: bool,
+    /// The product the session runs for: on macOS its agent's privacy
+    /// prompts name this app instead of agl.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_name: Option<String>,
 }
 
 fn yes() -> bool {
@@ -246,6 +250,10 @@ pub struct CreateParams {
     /// feature (local only).
     #[serde(default)]
     pub ephemeral: bool,
+    /// The product the session runs for (macOS privacy prompts name it).
+    /// A hub's sessions default to the link's `app_name`.
+    #[serde(default)]
+    pub app_name: Option<String>,
     /// Set by the dispatcher, never by the caller.
     #[serde(skip)]
     pub origin: Option<Origin>,
@@ -397,6 +405,10 @@ impl Manager {
             bail!("`extra_args`, `instructions` and `ephemeral` are accepted from local connections only");
         }
         check_launch(&def, &p.extra_args, instructions.as_deref(), p.ephemeral)?;
+        let app_name = match &p.app_name {
+            Some(n) => crate::app::validate(n)?,
+            None => None,
+        };
         if p.ephemeral && p.resume.is_some() {
             bail!("an `ephemeral` session cannot `resume` a native conversation");
         }
@@ -451,6 +463,7 @@ impl Manager {
             extra_args: p.extra_args,
             instructions,
             ephemeral: p.ephemeral,
+            app_name,
         };
         let shared = self.start_actor(meta.clone());
         if p.warm {
@@ -1201,6 +1214,7 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                         instructions: m.instructions.clone(),
                         ephemeral: m.ephemeral,
                         unattended: false,
+                        app_name: m.app_name.clone(),
                     });
                     (spec, m.ephemeral && m.native_id.is_some())
                 };

@@ -44,6 +44,9 @@ enum Cmd {
         /// Attach to an existing native conversation id
         #[arg(long)]
         resume: Option<String>,
+        /// Run the agent for this product: macOS privacy prompts name it instead of agl
+        #[arg(long)]
+        app_name: Option<String>,
         /// Print raw events as JSON lines
         #[arg(long)]
         json: bool,
@@ -169,6 +172,10 @@ enum Cmd {
         /// How to reach the hub: `ws` (one WebSocket, default) or `http` (long polling)
         #[arg(long)]
         transport: Option<String>,
+        /// The product behind this hub: macOS privacy prompts for its sessions
+        /// name it instead of agl (`""` clears it)
+        #[arg(long)]
+        app_name: Option<String>,
     },
     /// Unlink this machine from a hub (the only one, or the named one)
     Disconnect {
@@ -226,9 +233,13 @@ enum ServiceAction {
     Status,
 }
 
-#[tokio::main]
-async fn main() {
-    if let Err(e) = real_main().await {
+fn main() {
+    // A product launcher (`__hold`) stays a small process: no runtime, no CLI.
+    if let Some(code) = agl::app::hold_from_args() {
+        std::process::exit(code);
+    }
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
+    if let Err(e) = rt.block_on(real_main()) {
         eprintln!("agl: {e:#}");
         std::process::exit(1);
     }
@@ -324,7 +335,7 @@ async fn real_main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&m)?);
             Ok(())
         }
-        Cmd::Run { agent, prompt, session, cwd, model, effort, access, resume, json } => {
+        Cmd::Run { agent, prompt, session, cwd, model, effort, access, resume, app_name, json } => {
             let text = prompt_text(prompt)?;
             let mut c = ensure_daemon(&cfg).await?;
             let cwd = match cwd {
@@ -333,7 +344,7 @@ async fn real_main() -> Result<()> {
             };
             let cwd = std::fs::canonicalize(&cwd).with_context(|| format!("cwd {}", cwd.display()))?;
             let meta = c
-                .call("session.create", json!({"agent": agent, "cwd": cwd, "model": model, "effort": effort, "access": access, "name": session, "resume": resume}))
+                .call("session.create", json!({"agent": agent, "cwd": cwd, "model": model, "effort": effort, "access": access, "name": session, "resume": resume, "app_name": app_name}))
                 .await?;
             let sid = meta["id"].as_str().unwrap_or_default().to_string();
             let outcome = run_turn(&mut c, &sid, &text, "queue", json).await?;
@@ -454,7 +465,7 @@ async fn real_main() -> Result<()> {
             println!("suspended {} · removed {}", r["suspended"].as_array().map_or(0, |a| a.len()), r["removed"].as_array().map_or(0, |a| a.len()));
             Ok(())
         }
-        Cmd::Connect { url, code, token, name, access, private, transport } => {
+        Cmd::Connect { url, code, token, name, access, private, transport, app_name } => {
             link::ws_url(&url, "")?;
             if code.is_none() && token.is_none() {
                 bail!("pass --code <pairing code> or --token <token>");
@@ -482,6 +493,9 @@ async fn real_main() -> Result<()> {
             }
             if let Some(t) = transport {
                 entry.transport = t;
+            }
+            if let Some(n) = app_name {
+                entry.app_name = agl::app::validate(&n).context("--app-name")?;
             }
             cfg.hubs.retain(|h| h.url != url);
             cfg.hubs.push(entry.clone());

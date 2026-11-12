@@ -5,6 +5,7 @@
 //! daemon: `let mgr = agl::session::Manager::new(agl::config::Config::load()?);`
 
 pub mod agents;
+pub mod app;
 pub mod client;
 pub mod config;
 pub mod daemon;

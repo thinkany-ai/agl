@@ -129,7 +129,7 @@ vanish for its own creator; `"shared"` (the default) is accepted.
 | `agents.models` | `{agent}` | `{agent, models: [{id, name, description?, default?, efforts?[]}]}`. Never starts a conversation the user would see. |
 | `daemon.status` | – | Version, protocol, pid, `started_at` (0.3.12), port, `hubs: [{url, status, access, share_local}]` (a hub sees only its own entry), visible sessions, `busy` (sessions with a turn running or queued, from agl 0.3.2), `managed` (started by the autostart service, which restarts it; from 0.3.8), live processes, defaults |
 | `daemon.update` | `{if_idle?}` | From agl 0.3.2. Updates agl to the newest release (checked against its sha256) and restarts the daemon on it: `{updated, current, latest, busy?, busy_elsewhere?}`. With `if_idle`, nothing happens while a session runs a turn (`busy`). A restart ends running turns, so a hub never ends another's: while a session the hub did not create (another hub's, or a local one) runs a turn, nothing happens even without `if_idle` (`busy_elsewhere`, also counted in `busy`). Any hub link may call it (from agl 0.3.5; before, `full` only): it installs only the official release, never a binary the hub picks. Below `full`, the update always behaves as `if_idle`; the link comes back by itself. The new daemon is started by the autostart service when it runs this daemon, otherwise by agl itself (before 0.3.8 an installed but idle service unit made agl skip that, and the daemon stayed down). Under launchd agl also kickstarts the job, since launchd may defer a KeepAlive respawn, and even a RunAtLoad start after `agl service install`, indefinitely (0.3.9 / 0.3.10). An agl inside an app bundle is updated with the app instead. |
-| `session.create` | `{agent, cwd?, model?, effort?, access?, name?, resume?, warm?, visibility?, history?, extra_args?, instructions?, ephemeral?}` | `SessionMeta`. Details: |
+| `session.create` | `{agent, cwd?, model?, effort?, access?, name?, resume?, warm?, visibility?, history?, extra_args?, instructions?, ephemeral?, app_name?}` | `SessionMeta`. Details: |
 | | | `name`: if a session with that name exists (and is visible to the caller), it is reused. |
 | | | `access`: when omitted, the config's `default_access` for local callers, the link's `access` (default `ask`) for a hub. |
 | | | `resume`: attaches a native id. |
@@ -138,6 +138,7 @@ vanish for its own creator; `"shared"` (the default) is accepted.
 | | | `visibility` (0.3.12): `shared` (default) or `local`, which hides the session from every hub link; see [Visibility](#visibility-one-machine-several-hubs). Local clients only. |
 | | | `history` (0.3.12): `false` keeps the session's events out of `$AGL_HOME/history`; see [History](#history). Default `true`. |
 | | | `extra_args`, `instructions`, `ephemeral` (0.3.12): [launch settings](#launch-settings-local-only), local clients only. |
+| | | `app_name` (0.3.13): the product the session runs for; macOS privacy prompts name it instead of agl. A hub's sessions default to the link's `app_name`. See [App name](#app-name-macos-privacy-prompts). |
 | | | Settings apply when the session is created; reusing a session by `name` keeps its own. |
 | `session.prompt` | `{session_id, text, mode?, turn_id?}` | `{session_id, turn_id}`, returned as soon as the prompt is accepted. `mode`: |
 | | | `queue` (default): run after the current turn. |
@@ -153,7 +154,7 @@ vanish for its own creator; `"shared"` (the default) is accepted.
 | `session.close` | `{session_id}` | Kills the process and deletes the session. |
 | `fs.read` | `{path}` | `{content_base64, size}`. `path` is absolute or `~/…`; up to 100 MB. |
 | `fs.write` | `{path, content_base64}` | `{size}`. Creates parent directories and replaces the file atomically. |
-| `exec` | `{argv, cwd?, timeout_ms?, env?, stdin?}` | `{stdout, stderr, exit_code, timed_out, truncated}`. Runs `argv` without a shell, with the agents' environment (login-shell PATH), in its own process group; on timeout (default 10 min, max 30) the whole tree is killed. Output is kept up to 16 MiB per stream. |
+| `exec` | `{argv, cwd?, timeout_ms?, env?, stdin?, app_name?}` | `{stdout, stderr, exit_code, timed_out, truncated}`. `app_name` (0.3.13) as for `session.create`, defaulting to the link's. Runs `argv` without a shell, with the agents' environment (login-shell PATH), in its own process group; on timeout (default 10 min, max 30) the whole tree is killed. Output is kept up to 16 MiB per stream. |
 
 `fs.*` and `exec` exist from agl 0.3.0. A hub gets them only as far as its
 link's access allows, since nobody is asked first: any link may `fs.read`,
@@ -191,7 +192,50 @@ is what the runtime reported running. `origin` is `local` or a hub URL.
 `shared`). `history` is whether events are written to disk, and `last_seq` the
 `seq` of the session's newest event (both from 0.3.12). `extra_args`,
 `instructions` and `ephemeral` appear when set (local clients only; a hub
-never sees `extra_args` or `instructions`).
+never sees `extra_args` or `instructions`). `app_name` appears when set
+(0.3.13).
+
+## App name (macOS privacy prompts)
+
+From agl 0.3.13. When an agent opens a protected folder (Downloads,
+Documents, Desktop), records the screen or controls other apps, macOS asks
+the user on behalf of the agent's *responsible process*. That is the agl
+daemon, so without an app name the prompt reads "agl wants to access …",
+which users of your product do not recognize.
+
+Give the session an `app_name` and the prompt names your product instead:
+"Sumus wants to access …". Each product keeps its own name and its own
+grants, even when several share one agl daemon. Sessions without one keep
+showing "agl".
+
+| where | how |
+|---|---|
+| a hub's sessions | `agl connect <hub> --app-name Sumus` stores it on the link; every session and `exec` the hub starts uses it. The install script passes the `__APP_NAME__` placeholder, which the hub fills in, as `--app-name` (deliberately not an environment variable: a name exported in the user's shell would leak into every other product's link). Re-running `agl connect` without the flag keeps it; `--app-name ""` clears it. |
+| one session | `session.create {app_name}` (any caller); it overrides the link's. Stored with the session, so restarts and resumes keep it. |
+| `exec` | `exec {app_name}`, defaulting to the link's. |
+| CLI | `agl run <agent> --app-name Sumus …` |
+
+The name is trimmed, at most 48 characters, without `/`, `:` or control
+characters, and cannot start with `.`; anything else is refused. An empty
+name or `agl` means none. A hub filling `__APP_NAME__` puts it inside double
+quotes in a shell script, so it must not contain `"`, `$`, `` ` `` or `\`.
+
+How it works: agl builds `$AGL_HOME/apps/<app_name>.app`, a bundle named
+after the product (ad-hoc signed, `cc.agl.app.<slug>`), whose executable is a
+copy of agl acting as a launcher. The agent is started through it; the
+launcher disclaims responsibility (as Terminal does for its shells), so macOS
+attributes the agent and everything it starts to that bundle. The launcher is
+only rebuilt when its own protocol changes, not on agl updates, so the user's
+grants for the product survive agl updates. Renaming creates a new bundle,
+and macOS asks again.
+
+Limits: macOS only (elsewhere `app_name` is accepted and has no effect).
+`fs.read` / `fs.write` run inside the daemon and stay attributed to agl. An
+app that embeds agl's session manager (`agl::session::Manager`) gets this
+only if its `main` calls `agl::app::hold_from_args()` first thing, since the
+launcher is a copy of the running executable. A desktop app that starts the
+agl daemon as its own child process is already the responsible process, so
+its prompts name the app without an `app_name`.
 
 ## Launch settings (local only)
 
@@ -420,7 +464,7 @@ Custom agents carry no `install` or update fields. Detection only reads; nothing
   "tool_output_limit": 16384, "history_limit": 2000, "history_image_limit": 16,
   "custom_agents": [{"id": "goose", "command": "goose", "args": ["acp"], "protocol": "acp"}],
   "extra_paths": ["~/Library/Application Support/MyApp/bin"],
-  "hubs": [{"url": "https://app.example.com/agl", "token": "aglm_…", "access": "ask", "share_local": true}]
+  "hubs": [{"url": "https://app.example.com/agl", "token": "aglm_…", "access": "ask", "share_local": true, "app_name": "Sumus"}]
 }
 ```
 

@@ -10,11 +10,16 @@ umask 077
 
 HUB_URL="${AGL_HUB_URL:-__HUB_URL__}"
 CONNECT_ARGS="${AGL_CONNECT_ARGS:-__CONNECT_ARGS__}"
+# The product behind the hub: macOS privacy prompts for its sessions name it
+# instead of agl. Only the hub fills it in, never the environment, so one
+# product's name cannot leak into another product's link.
+APP_NAME="__APP_NAME__"
 INSTALL_DIR="${AGL_INSTALL_DIR:-$HOME/.agl/bin}"
 RELEASES="${AGL_RELEASES_URL:-https://github.com/thinkany-ai/agl/releases/latest/download}"
 # Spelled in pieces so a hub filling in the placeholders leaves these alone.
 [ "$HUB_URL" = "__HUB""_URL__" ] && HUB_URL=""
 [ "$CONNECT_ARGS" = "__CONNECT""_ARGS__" ] && CONNECT_ARGS=""
+[ "$APP_NAME" = "__APP""_NAME__" ] && APP_NAME=""
 
 say() { printf '\033[1m%s\033[0m\n' "$*"; }
 fail() { printf '\033[31magl:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -133,7 +138,11 @@ say "Linking this machine to $HUB_URL"
 # A daemon already running keeps running (other web apps may be using it).
 [ "$running" = "true" ] || [ "$running" = "restarted" ] || start_daemon
 # shellcheck disable=SC2086
-"$INSTALL_DIR/agl" connect "$HUB_URL" $CONNECT_ARGS
+if [ -n "$APP_NAME" ]; then
+  "$INSTALL_DIR/agl" connect "$HUB_URL" $CONNECT_ARGS --app-name "$APP_NAME"
+else
+  "$INSTALL_DIR/agl" connect "$HUB_URL" $CONNECT_ARGS
+fi
 
 say "Done. This machine is now available at $HUB_URL"
 echo "  agl status        # daemon + hub link"

@@ -101,6 +101,10 @@ pub struct HubLink {
     /// pairing; bigger messages are sent in parts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_body: Option<usize>,
+    /// The product behind this hub: its sessions' macOS privacy prompts
+    /// name it instead of agl, unless `session.create` names another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_name: Option<String>,
 }
 
 pub const TRANSPORTS: [&str; 2] = ["ws", "http"];
@@ -119,7 +123,7 @@ fn default_true() -> bool {
 
 impl HubLink {
     pub fn new(url: &str) -> HubLink {
-        HubLink { url: normalize_url(url), token: None, pair_code: None, access: default_remote_access(), share_local: true, transport: default_transport(), max_body: None }
+        HubLink { url: normalize_url(url), token: None, pair_code: None, access: default_remote_access(), share_local: true, transport: default_transport(), max_body: None, app_name: None }
     }
 }
 

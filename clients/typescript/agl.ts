@@ -60,6 +60,8 @@ export interface SessionMeta {
   /** agl 0.3.12+ */
   visibility?: "shared" | "local"; history?: boolean; last_seq?: number;
   extra_args?: string[]; instructions?: string; ephemeral?: boolean;
+  /** agl 0.3.13+ */
+  app_name?: string;
 }
 
 export interface InstallInfo {
@@ -91,6 +93,8 @@ export interface CreateSession {
   instructions?: string;
   /** agl 0.3.12+, local only, agents with the `ephemeral` feature. */
   ephemeral?: boolean;
+  /** agl 0.3.13+: macOS privacy prompts name this product instead of agl. */
+  app_name?: string;
 }
 
 /**

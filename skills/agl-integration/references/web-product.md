@@ -27,6 +27,9 @@ two endpoints into your stack.
    replaced:
    - `__HUB_URL__` becomes your base URL.
    - `__CONNECT_ARGS__` becomes `--code <code>`.
+   - `__APP_NAME__` (agl 0.3.13+, optional) becomes your product's name, so
+     macOS privacy prompts say "<your product> wants to access …" instead of
+     "agl …" (see App name in protocol.md). Leave it as is to skip.
    - If the code is invalid, return a script that only prints an error and
      exits 1.
 4. The script:
