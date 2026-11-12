@@ -999,6 +999,11 @@ pub(crate) mod rpc {
     }
 }
 
+/// Serializes unit tests that spawn tracked processes: `reap_orphans`
+/// kills every tracked process, including another test's.
+#[cfg(test)]
+pub(crate) static TRACKED_PROCESS_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod reap_tests {
     use super::*;
@@ -1006,6 +1011,7 @@ mod reap_tests {
     #[cfg(unix)]
     #[test]
     fn reaps_a_tracked_process_that_exec_ed_after_spawn() {
+        let _serial = TRACKED_PROCESS_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let home = std::env::temp_dir().join(format!("agl-reap-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&home).unwrap();
         std::env::set_var("AGL_HOME", &home);

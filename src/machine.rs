@@ -420,7 +420,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // a test lock; nothing else awaits it
     async fn write_read_and_exec() {
+        let _serial = crate::agents::TRACKED_PROCESS_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("agl-machine-{}", uuid::Uuid::new_v4().simple()));
         let file = dir.join("a/b.txt");
         let path = file.to_str().unwrap();
