@@ -1200,6 +1200,7 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                         extra_args: m.extra_args.clone(),
                         instructions: m.instructions.clone(),
                         ephemeral: m.ephemeral,
+                        unattended: false,
                     });
                     (spec, m.ephemeral && m.native_id.is_some())
                 };

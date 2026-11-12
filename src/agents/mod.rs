@@ -22,7 +22,7 @@ mod oneshot;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{bail, Result};
@@ -269,6 +269,9 @@ pub struct SpawnSpec {
     pub instructions: Option<String>,
     /// Keep no native conversation on disk (`ephemeral` feature).
     pub ephemeral: bool,
+    /// A metadata probe nobody is watching: it must not open anything on the
+    /// user's screen (`no_browser_dir`).
+    pub unattended: bool,
 }
 
 /// A throwaway spec for metadata probes (model lists).
@@ -286,7 +289,38 @@ pub(crate) fn probe_spec(id: &str, protocol: Protocol) -> SpawnSpec {
         extra_args: Vec::new(),
         instructions: None,
         ephemeral: false,
+        unattended: true,
     }
+}
+
+/// Probes run unattended, yet an agent that is not signed in may start its
+/// sign-in flow and open the user's browser: Gemini CLI does, from ACP
+/// `session/new`, whenever its OAuth credentials are missing or expired (and
+/// hubs refresh model lists on every hello). `NO_BROWSER` does not help: ACP
+/// counts as interactive, so gemini then reads an authorization code from
+/// stdin, which is the protocol stream. Instead a probe's PATH starts with
+/// browser openers that do nothing; the agent waits for a sign-in that never
+/// comes and the probe's timeout ends it.
+fn no_browser_dir() -> Option<PathBuf> {
+    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| write_no_browser(&config::home().join("no-browser"))).clone()
+}
+
+#[cfg(unix)]
+fn write_no_browser(dir: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir).ok()?;
+    for name in ["open", "xdg-open"] {
+        let file = dir.join(name);
+        std::fs::write(&file, "#!/bin/sh\nexit 0\n").ok()?;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).ok()?;
+    }
+    Some(dir.to_path_buf())
+}
+
+#[cfg(not(unix))]
+fn write_no_browser(_dir: &Path) -> Option<PathBuf> {
+    None
 }
 
 pub enum Driver {
@@ -534,7 +568,8 @@ where
 pub(crate) fn base_command(bin: &std::path::Path, spec: &SpawnSpec) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(bin);
     shellenv::apply(&mut cmd);
-    let extra = bundled_path_dirs(bin);
+    let quiet = if spec.unattended { no_browser_dir() } else { None };
+    let extra: Vec<PathBuf> = quiet.into_iter().chain(bundled_path_dirs(bin)).collect();
     if !extra.is_empty() {
         let path = std::env::join_paths(extra.into_iter().chain(std::env::split_paths(&shellenv::path_var())));
         if let Ok(path) = path {
@@ -983,6 +1018,19 @@ mod reap_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_browser_openers_do_nothing() {
+        assert!(probe_spec("gemini", Protocol::Acp).unattended);
+        let dir = std::env::temp_dir().join(format!("agl-no-browser-{}", std::process::id()));
+        let dir = write_no_browser(&dir).unwrap();
+        for name in ["open", "xdg-open"] {
+            let status = std::process::Command::new(dir.join(name)).arg("https://example.com").status().unwrap();
+            assert!(status.success());
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
 
     #[cfg(unix)]
     #[test]
