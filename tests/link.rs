@@ -162,6 +162,31 @@ async fn linked_machine_runs_a_turn(transport: &str, max_body: Option<usize>) {
     let machine = ui.machine_online(true).await;
     assert_eq!(machine["transport"], transport);
 
+    // Built-in tools use the same two transports and need no agent session.
+    let tools = ui.call(Some(MACHINE_ID), "tools.list", json!({})).await;
+    assert_eq!(tools.as_array().unwrap().len(), 4);
+    let tool_file = machine_home.join("tools.txt");
+    ui.call(Some(MACHINE_ID), "tools.call", json!({"name":"write","arguments":{"path":tool_file,"content":"hello tools"}})).await;
+    ui.call(Some(MACHINE_ID), "tools.call", json!({"name":"edit","arguments":{"path":tool_file,"old_text":"hello","new_text":"你好"}})).await;
+    let read = ui.call(Some(MACHINE_ID), "tools.call", json!({"name":"read","arguments":{"path":tool_file}})).await;
+    assert_eq!(read["content"], "你好 tools");
+    let started = ui.call(Some(MACHINE_ID), "tools.call", json!({"name":"exec","arguments":{"command":"printf cloud-tools","execution_id":"hub-tool-call","wait_ms":0}})).await;
+    let id = started["execution_id"].as_str().unwrap();
+    // A new browser socket can continue a command by ID without a subscription.
+    ui.ws.close(None).await.unwrap();
+    let (ws, _) = tokio_tungstenite::connect_async(ui_url.as_str()).await.unwrap();
+    ui = Browser { ws, next: 0, events: vec![] };
+    let mut output = started["stdout"].as_str().unwrap().to_string();
+    let mut cursor = started["stdout_offset"].clone();
+    let mut result = started.clone();
+    while result["status"] != "completed" || result["has_more"] == true {
+        result = ui.call(Some(MACHINE_ID), "exec.read", json!({"execution_id":id,"stdout_offset":cursor,"wait_ms":1000})).await;
+        output.push_str(result["stdout"].as_str().unwrap());
+        cursor = result["stdout_offset"].clone();
+    }
+    assert_eq!(output, "cloud-tools");
+    assert_eq!(result["exit_code"], 0);
+
     // Requests reach the machine and come back.
     let agents = ui.call(Some(MACHINE_ID), "agents.list", json!({})).await;
     assert!(agents.as_array().unwrap().iter().any(|a| a["id"] == "mock" && a["available"] == true), "{agents}");

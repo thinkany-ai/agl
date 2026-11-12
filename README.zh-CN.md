@@ -2,8 +2,9 @@
 
 [English](README.md) | 简体中文
 
-一个 Rust 单文件二进制（约 4MB），用来驱动本机的编码 Agent：Claude Code、Codex、Gemini、Kimi、OpenCode、Grok、Cursor 等。它提供：
+一个 Rust 单文件二进制（约 4MB），用来操作本地资源、驱动本机的编码 Agent：Claude Code、Codex、Gemini、Kimi、OpenCode、Grok、Cursor 等。它提供：
 
+- 云端应用可通过内置的 `read/write/edit/exec` 四个工具操作本地资源，无需安装其他 Agent；模型调用和任务循环由应用自己负责；
 - 常驻热会话、并发与排队、审批、运行中插话（steer）、中断、模型列表、自动垃圾回收；
 - 一条 `curl … | sh` 就能把任意机器接入你的 Web 应用，网页和机器上的 Agent 双向通信。
 
@@ -20,6 +21,7 @@
 
 | | |
 |---|---|
+| **内置本地工具** | 为云端 Agent 循环提供四个可发现工具，无需本地 Agent：分段读取、精确编辑、可取消命令、增量输出和执行 ID 去重。[接入说明](skills/agl-integration/references/local-tools.md) |
 | **一套协议驱动 11+ 种 Agent** | 每个 Agent 都用它最好的第一方接口；还可以通过配置接入任意支持 ACP 的 CLI |
 | **热会话、复用上下文** | 两轮之间进程不退出；被回收或重启后用原生 resume 接上原对话。实测 claude 每轮首字从约 6s 降到约 1s |
 | **复用会话** | 用名字复用（`-s name`）。CLI、桌面 App、网页共用同一批会话，可以互相接着聊；会话历史落盘，带续传游标 |

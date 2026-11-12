@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 fn daemon(cfg: Config) -> Arc<Daemon> {
     Arc::new(Daemon {
         mgr: Manager::new(cfg),
+        tools: agl::machine::Runtime::default(),
         hub_status: Mutex::default(),
         reload: tokio::sync::watch::Sender::new(0),
         shutdown: tokio::sync::Notify::new(),

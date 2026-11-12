@@ -18,12 +18,53 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::config::Config;
 use crate::session::Origin;
 
+mod executions;
+mod tools;
+pub use executions::Executions;
+pub use tools::names as tool_names;
+
+/// Built-in tools, independent of installed coding agents or model credentials.
+#[derive(Default)]
+pub struct Runtime {
+    pub executions: Executions,
+    files: tokio::sync::Mutex<()>,
+}
+
+impl Runtime {
+    pub async fn dispatch(&self, cfg: &Config, origin: &Origin, method: &str, params: Value) -> Result<Value> {
+        if method == "tools.list" {
+            return Ok(tools::list(cfg, origin));
+        }
+        if method == "tools.call" {
+            return tools::call(self, cfg, origin, params).await;
+        }
+        allowed(cfg, origin, method)?;
+        match method {
+            "exec" => self.executions.exec(params, link_app(cfg, origin), origin).await,
+            "exec.start" => self.executions.start(params, link_app(cfg, origin), origin),
+            "exec.read" => self.executions.read(params, origin).await,
+            "exec.cancel" => self.executions.cancel(params, origin),
+            "fs.write" | "fs.edit" => {
+                // Serialize agl mutations so concurrent exact edits cannot lose updates.
+                let _guard = self.files.lock().await;
+                dispatch(cfg, origin, method, params).await
+            }
+            _ => dispatch(cfg, origin, method, params).await,
+        }
+    }
+}
+
+fn link_app(cfg: &Config, origin: &Origin) -> Option<String> {
+    match origin {
+        Origin::Hub { url, .. } => cfg.hub(url).and_then(|h| h.app_name.clone()),
+        Origin::Local => None,
+    }
+}
+
 /// Largest file `fs.read` / `fs.write` move in one call.
 pub const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
 const EXEC_TIMEOUT_DEFAULT: Duration = Duration::from_secs(10 * 60);
 const EXEC_TIMEOUT_MAX: Duration = Duration::from_secs(30 * 60);
-/// Per stream; the rest is dropped and `truncated` set.
-const EXEC_OUTPUT_MAX: usize = 16 * 1024 * 1024;
 
 /// What a hub may do, by its link's access: any link may read, `edit` and
 /// `full` may also write, and only `full` may run a command.
@@ -32,7 +73,7 @@ pub(crate) fn allowed(cfg: &Config, origin: &Origin, method: &str) -> Result<()>
     let access = cfg.hub(url).map(|h| h.access.as_str()).unwrap_or("ask");
     let ok = match method {
         "fs.read" => true,
-        "fs.write" => matches!(access, "edit" | "full"),
+        "fs.write" | "fs.edit" => matches!(access, "edit" | "full"),
         _ => access == "full",
     };
     if ok {
@@ -74,6 +115,7 @@ pub async fn dispatch(cfg: &Config, origin: &Origin, method: &str, params: Value
     match method {
         "fs.read" => read(params).await,
         "fs.write" => write(params).await,
+        "fs.edit" => edit(params).await,
         "exec" => {
             // A hub's commands are its product's, as its sessions are.
             let link_app = match origin {
@@ -89,11 +131,26 @@ pub async fn dispatch(cfg: &Config, origin: &Origin, method: &str, params: Value
 #[derive(Deserialize)]
 struct ReadParams {
     path: String,
+    /// Absent/base64 preserves the original binary API. UTF-8 reads are paged.
+    encoding: Option<String>,
+    offset: Option<usize>,
+    limit: Option<usize>,
 }
 
 async fn read(params: Value) -> Result<Value> {
     let p: ReadParams = serde_json::from_value(params).context("fs.read params")?;
     let path = resolve(&p.path)?;
+    let text = match p.encoding.as_deref() {
+        None | Some("base64") => false,
+        Some("utf8") => true,
+        _ => bail!("encoding must be `base64` or `utf8`"),
+    };
+    if text {
+        return read_text(&path, p.offset.unwrap_or(1), p.limit.unwrap_or(2000)).await;
+    }
+    if p.offset.is_some() || p.limit.is_some() {
+        bail!("offset and limit require encoding `utf8`");
+    }
     let meta = tokio::fs::metadata(&path).await.with_context(|| format!("read {}", path.display()))?;
     if !meta.is_file() {
         bail!("not a file: {}", path.display());
@@ -101,38 +158,165 @@ async fn read(params: Value) -> Result<Value> {
     if meta.len() > MAX_FILE_BYTES {
         bail!("file is larger than {} MB: {}", MAX_FILE_BYTES / 1024 / 1024, path.display());
     }
-    let bytes = tokio::fs::read(&path).await.with_context(|| format!("read {}", path.display()))?;
+    let mut bytes = Vec::new();
+    tokio::fs::File::open(&path).await?.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes).await?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        bail!("file is larger than 100 MB");
+    }
     Ok(json!({"content_base64": base64::engine::general_purpose::STANDARD.encode(&bytes), "size": bytes.len()}))
 }
 
 #[derive(Deserialize)]
 struct WriteParams {
     path: String,
-    content_base64: String,
+    content_base64: Option<String>,
+    content: Option<String>,
 }
 
 /// Parent directories are created; the file is replaced atomically.
 async fn write(params: Value) -> Result<Value> {
     let p: WriteParams = serde_json::from_value(params).context("fs.write params")?;
     let path = resolve(&p.path)?;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(p.content_base64.as_bytes()).context("content_base64 is not base64")?;
+    let bytes = match (p.content, p.content_base64) {
+        (Some(s), None) => s.into_bytes(),
+        (None, Some(s)) => base64::engine::general_purpose::STANDARD.decode(s.as_bytes()).context("content_base64 is not base64")?,
+        _ => bail!("provide exactly one of content or content_base64"),
+    };
+    atomic_write(&path, &bytes).await?;
+    Ok(json!({"size": bytes.len()}))
+}
+
+async fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     if bytes.len() as u64 > MAX_FILE_BYTES {
         bail!("file is larger than {} MB", MAX_FILE_BYTES / 1024 / 1024);
     }
     let parent = path.parent().context("path has no parent directory")?;
     tokio::fs::create_dir_all(parent).await.with_context(|| format!("create {}", parent.display()))?;
     let tmp = parent.join(format!(".{}.agl-{}", path.file_name().and_then(|n| n.to_str()).unwrap_or("file"), uuid::Uuid::new_v4().simple()));
-    tokio::fs::write(&tmp, &bytes).await.with_context(|| format!("write {}", path.display()))?;
-    if let Err(e) = tokio::fs::rename(&tmp, &path).await {
+    let result = async {
+        // Preserve the mode of existing files (scripts and private credentials).
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut f = options.open(&tmp).await?;
+        f.write_all(bytes).await?;
+        if let Ok(meta) = tokio::fs::metadata(path).await {
+            f.set_permissions(meta.permissions()).await?;
+        }
+        f.flush().await?;
+        tokio::fs::rename(&tmp, path).await
+    }
+    .await;
+    if let Err(e) = result {
         let _ = tokio::fs::remove_file(&tmp).await;
         return Err(e).with_context(|| format!("write {}", path.display()));
     }
-    Ok(json!({"size": bytes.len()}))
+    Ok(())
+}
+
+const TEXT_OUTPUT_MAX: usize = 64 * 1024;
+
+/// Line-oriented text reads never load the whole file or an unbounded line.
+async fn read_text(path: &std::path::Path, offset: usize, limit: usize) -> Result<Value> {
+    use tokio::io::AsyncBufReadExt;
+    if offset == 0 || limit == 0 || limit > 10_000 {
+        bail!("offset is 1-based; limit must be 1..10000");
+    }
+    let meta = tokio::fs::metadata(path).await?;
+    if !meta.is_file() {
+        bail!("not a file: {}", path.display());
+    }
+    let file = tokio::fs::File::open(path).await?;
+    let mut reader = tokio::io::BufReader::new(file);
+    let mut line = 1;
+    let mut bytes = Vec::new();
+    let mut lines = 0;
+    let mut eof = false;
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            eof = true;
+            break;
+        }
+        let end = chunk.iter().position(|b| *b == b'\n').map_or(chunk.len(), |i| i + 1);
+        if line >= offset {
+            if lines == limit {
+                break;
+            }
+            if bytes.len() + end > TEXT_OUTPUT_MAX {
+                if bytes.is_empty() {
+                    bail!("line {line} exceeds the 64 KiB text output limit; use exec or a binary read");
+                }
+                // Never return a partial line: remove this line's earlier chunks.
+                let keep = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+                bytes.truncate(keep);
+                if bytes.is_empty() {
+                    bail!("line {line} exceeds the 64 KiB text output limit");
+                }
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..end]);
+        }
+        let newline = chunk[end - 1] == b'\n';
+        reader.consume(end);
+        if newline {
+            if line >= offset {
+                lines += 1;
+            }
+            line += 1;
+        }
+    }
+    if eof && !bytes.is_empty() && bytes.last() != Some(&b'\n') {
+        lines += 1;
+    }
+    let content = String::from_utf8(bytes).context("file is not UTF-8; use encoding base64")?;
+    Ok(json!({"content": content, "size": meta.len(), "offset": offset, "lines": lines,
+        "next_offset": if eof { None } else { Some(offset + lines) }, "truncated": !eof}))
+}
+
+#[derive(Deserialize)]
+struct EditParams {
+    path: String,
+    old_text: String,
+    new_text: String,
+}
+
+async fn edit(params: Value) -> Result<Value> {
+    let p: EditParams = serde_json::from_value(params).context("fs.edit params")?;
+    if p.old_text.is_empty() {
+        bail!("old_text must not be empty");
+    }
+    // Read and replace the same target, keeping a user-facing symlink intact.
+    let path = tokio::fs::canonicalize(resolve(&p.path)?).await?;
+    let meta = tokio::fs::metadata(&path).await?;
+    if !meta.is_file() {
+        bail!("not a file: {}", path.display());
+    }
+    if meta.len() > MAX_FILE_BYTES {
+        bail!("file is larger than 100 MB");
+    }
+    // Take at most the cap even if another process grows the file.
+    let mut bytes = Vec::new();
+    tokio::fs::File::open(&path).await?.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes).await?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        bail!("file is larger than 100 MB");
+    }
+    let content = String::from_utf8(bytes).context("file is not UTF-8")?;
+    let first = content.find(&p.old_text).context("old_text was not found; read the file again")?;
+    if content[first + content[first..].chars().next().unwrap().len_utf8()..].contains(&p.old_text) {
+        bail!("old_text matches more than once; provide more context");
+    }
+    let updated = format!("{}{}{}", &content[..first], p.new_text, &content[first + p.old_text.len()..]);
+    atomic_write(&path, updated.as_bytes()).await?;
+    Ok(json!({"size": updated.len(), "replacements": 1}))
 }
 
 #[derive(Deserialize)]
 struct ExecParams {
+    #[serde(default)]
     argv: Vec<String>,
+    command: Option<String>,
     cwd: Option<String>,
     timeout_ms: Option<u64>,
     #[serde(default)]
@@ -144,12 +328,18 @@ struct ExecParams {
 
 /// Run `argv` (no shell) with the agents' environment, in its own process
 /// group, killed with everything it started on timeout.
-async fn exec(params: Value, link_app: Option<String>) -> Result<Value> {
-    let p: ExecParams = serde_json::from_value(params).context("exec params")?;
+fn spawn_exec(params: Value, link_app: Option<String>) -> Result<(tokio::process::Child, Duration, Option<String>)> {
+    let mut p: ExecParams = serde_json::from_value(params).context("exec params")?;
     let app_name = match p.app_name.as_deref().or(link_app.as_deref()) {
         Some(n) => crate::app::validate(n)?,
         None => None,
     };
+    if let Some(command) = p.command.take() {
+        if !p.argv.is_empty() {
+            bail!("provide argv or command, not both");
+        }
+        p.argv = vec!["/bin/sh".into(), "-c".into(), command];
+    }
     let Some(program) = p.argv.first() else { bail!("argv is empty") };
     let cwd = match &p.cwd {
         Some(c) => resolve(c)?,
@@ -170,47 +360,12 @@ async fn exec(params: Value, link_app: Option<String>) -> Result<Value> {
         .kill_on_drop(true);
     #[cfg(unix)]
     cmd.process_group(0);
-    let mut child = cmd.spawn().with_context(|| format!("run {program}"))?;
-    if let (Some(input), Some(mut sink)) = (p.stdin, child.stdin.take()) {
-        tokio::spawn(async move {
-            let _ = sink.write_all(input.as_bytes()).await;
-        });
-    }
-    let stdout = tokio::spawn(read_capped(child.stdout.take().expect("piped")));
-    let stderr = tokio::spawn(read_capped(child.stderr.take().expect("piped")));
-    let (status, timed_out) = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(status) => (Some(status?), false),
-        Err(_) => {
-            crate::agents::kill_tree(&mut child).await;
-            (None, true)
-        }
-    };
-    let (out, out_cut) = stdout.await.unwrap_or_default();
-    let (err, err_cut) = stderr.await.unwrap_or_default();
-    Ok(json!({
-        "stdout": String::from_utf8_lossy(&out),
-        "stderr": String::from_utf8_lossy(&err),
-        "exit_code": status.and_then(|s| s.code()).unwrap_or(-1),
-        "timed_out": timed_out,
-        "truncated": out_cut || err_cut,
-    }))
+    let child = cmd.spawn().with_context(|| format!("run {program}"))?;
+    Ok((child, timeout, p.stdin))
 }
 
-async fn read_capped(mut r: impl tokio::io::AsyncRead + Unpin) -> (Vec<u8>, bool) {
-    let mut out = Vec::new();
-    let mut buf = [0u8; 64 * 1024];
-    let mut cut = false;
-    loop {
-        match r.read(&mut buf).await {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                let room = EXEC_OUTPUT_MAX.saturating_sub(out.len());
-                out.extend_from_slice(&buf[..n.min(room)]);
-                cut |= n > room;
-            }
-        }
-    }
-    (out, cut)
+async fn exec(params: Value, link_app: Option<String>) -> Result<Value> {
+    Executions::default().exec(params, link_app, &Origin::Local).await
 }
 
 #[cfg(test)]

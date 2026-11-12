@@ -17,6 +17,11 @@ interface:
 
 Your product never parses agent output itself.
 
+For a product with its own cloud model and agent loop, use the four
+[built-in local tools](references/local-tools.md): `tools.list` / `tools.call`.
+No installed coding agent or agent session is required. The application owns
+model calls; agl executes `read`, `write`, `edit` and `exec`.
+
 ## 1. Pick the integration shape
 
 | Product | Where agl runs | Who talks to it | Read |

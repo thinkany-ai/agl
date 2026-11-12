@@ -97,6 +97,36 @@ export interface CreateSession {
   app_name?: string;
 }
 
+/** agl 0.3.14+: built-in tools need no installed coding agent or model key. */
+export type BuiltinToolName = "read" | "write" | "edit" | "exec";
+export interface BuiltinTool {
+  name: BuiltinToolName; description: string; input_schema: Record<string, unknown>;
+}
+export interface ReadFileOptions { offset?: number; limit?: number }
+export interface TextFileResult {
+  content: string; size: number; offset: number; lines: number;
+  next_offset: number | null; truncated: boolean;
+}
+/** Supply exactly one of argv (no shell) or command (/bin/sh -c). */
+export type ExecInput = ({ argv: string[]; command?: never } | { command: string; argv?: never }) & {
+  cwd?: string; timeout_ms?: number; env?: Record<string, string>; stdin?: string; app_name?: string;
+  /** Stable across start retries; IDs are scoped to the calling app. */
+  execution_id?: string;
+};
+export interface ExecReadOptions {
+  /** UTF-8 byte cursors returned by exec.read, initially 0. */
+  stdout_offset?: number; stderr_offset?: number;
+  /** 4..65536 bytes per stream. */
+  limit?: number;
+  /** Long poll for output or completion, at most 30000 ms. */
+  wait_ms?: number;
+}
+export interface ExecutionResult {
+  execution_id: string; status: "running" | "completed";
+  stdout: string; stderr: string; stdout_offset: number; stderr_offset: number; has_more: boolean;
+  exit_code: number | null; timed_out: boolean; cancelled: boolean; truncated: boolean; error: string | null;
+}
+
 /**
  * `text`: every non-commentary `text_delta` of the turn. `answer`: the final
  * answer agl reported on `turn_ended` (agl 0.3.12+), else undefined.
@@ -327,6 +357,17 @@ export class AglClient {
   }
 
   agents = (opts: { check_updates?: boolean } = {}) => this.call<AgentInfo[]>("agents.list", opts);
+  /** Schemas filtered by this connection's access; map input_schema to your model provider's parameters field. */
+  tools = () => this.call<BuiltinTool[]>("tools.list");
+  callTool = <T = unknown>(name: BuiltinToolName, args: Record<string, unknown>) =>
+    this.call<T>("tools.call", { name, arguments: args });
+  readFile = (path: string, opts: ReadFileOptions = {}) => this.call<TextFileResult>("fs.read", { path, encoding: "utf8", ...opts });
+  writeFile = (path: string, content: string) => this.call<{ size: number }>("fs.write", { path, content });
+  editFile = (path: string, oldText: string, newText: string) =>
+    this.call<{ size: number; replacements: number }>("fs.edit", { path, old_text: oldText, new_text: newText });
+  startExec = (input: ExecInput) => this.call<{ execution_id: string }>("exec.start", input);
+  readExec = (id: string, opts: ExecReadOptions = {}) => this.call<ExecutionResult>("exec.read", { execution_id: id, ...opts });
+  cancelExec = (id: string) => this.call<{ execution_id: string; ok: boolean }>("exec.cancel", { execution_id: id });
   models = (agent: string) => this.call<{ agent: string; models: { id: string; name?: string; efforts?: string[]; default?: boolean }[] }>("agents.models", { agent });
   createSession = (p: CreateSession) => this.call<SessionMeta>("session.create", p as any);
   sessions = () => this.call<SessionMeta[]>("session.list");

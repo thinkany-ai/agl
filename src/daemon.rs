@@ -30,6 +30,7 @@ use crate::session::{ConfigureParams, CreateParams, Manager, Origin, SessionMeta
 
 pub struct Daemon {
     pub mgr: Arc<Manager>,
+    pub tools: crate::machine::Runtime,
     /// Link status per hub URL.
     pub hub_status: Mutex<std::collections::HashMap<String, String>>,
     /// Bumped whenever the hub configuration changes.
@@ -79,6 +80,7 @@ pub async fn run(cfg: Config, opts: DaemonOptions) -> Result<()> {
         .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
     let daemon = Arc::new(Daemon {
         mgr: mgr.clone(),
+        tools: crate::machine::Runtime::default(),
         hub_status: Mutex::default(),
         reload: tokio::sync::watch::Sender::new(0),
         shutdown: Notify::new(),
@@ -89,11 +91,13 @@ pub async fn run(cfg: Config, opts: DaemonOptions) -> Result<()> {
     // Garbage collector.
     {
         let mgr = mgr.clone();
+        let d = daemon.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(30));
             loop {
                 tick.tick().await;
                 mgr.gc(false).await;
+                d.tools.executions.gc();
             }
         });
     }
@@ -142,9 +146,11 @@ pub async fn run(cfg: Config, opts: DaemonOptions) -> Result<()> {
                 _ = d.shutdown.notified() => {}
                 _ = terminate() => {}
             }
+            d.tools.executions.shutdown().await;
         })
         .await?;
     eprintln!("agl daemon shutting down");
+    daemon.tools.executions.shutdown().await;
     mgr.shutdown_all().await;
     // Only remove the file if it is still ours.
     if let Ok(s) = std::fs::read_to_string(config::daemon_file()) {
@@ -300,6 +306,7 @@ pub async fn machine_info(cfg: &Config) -> MachineInfo {
         version: VERSION.into(),
         protocol: PROTOCOL,
         agents: agents::detect(cfg, false).await,
+        tools: crate::machine::tool_names(),
     }
 }
 
@@ -351,7 +358,8 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
                 "hubs": hubs,
                 "sessions": mgr.list().iter().filter(|m| origin.can_see(m)).count(),
                 // Sessions with a turn running, starting, waiting or queued.
-                "busy": mgr.list().iter().filter(|m| !crate::session::is_idle(m)).count(),
+                "busy": mgr.list().iter().filter(|m| !crate::session::is_idle(m)).count() + d.tools.executions.busy_counts(origin).0,
+                "executions": d.tools.executions.busy_counts(origin).0,
                 // Started by the autostart service (which restarts it), not `agl start`.
                 "managed": crate::service::runs_this_process(),
                 "live": mgr.live_count(),
@@ -370,6 +378,8 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
             // its own: a turn running elsewhere (another hub, or a local
             // client) always defers the update, `if_idle` or not.
             let (own, elsewhere) = crate::session::busy_counts(&mgr.list(), origin);
+            let (exec_own, exec_elsewhere) = d.tools.executions.busy_counts(origin);
+            let (own, elsewhere) = (own + exec_own, elsewhere + exec_elsewhere);
             if !check.update_available {
                 json!({"updated": false, "current": check.current, "latest": check.latest})
             } else if elsewhere > 0 || (own > 0 && if_idle) {
@@ -466,7 +476,9 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
             serde_json::to_value(mgr.history(&sid()?, after, limit)?)?
         }
         "gc.run" if local => mgr.gc(params["idle"].as_bool().unwrap_or(false)).await,
-        "fs.read" | "fs.write" | "exec" => crate::machine::dispatch(&mgr.cfg(), origin, method, params).await?,
+        "tools.list" | "tools.call" | "fs.read" | "fs.write" | "fs.edit" | "exec" | "exec.start" | "exec.read" | "exec.cancel" => {
+            d.tools.dispatch(&mgr.cfg(), origin, method, params).await?
+        }
         other => return Err(anyhow!("unknown method `{other}`")),
     })
 }

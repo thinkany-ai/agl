@@ -188,6 +188,10 @@ pub struct MachineInfo {
     #[serde(default)]
     pub protocol: u32,
     pub agents: Vec<AgentInfo>,
+    /// Built-in tools, available without an installed coding agent. Use
+    /// tools.list for schemas filtered by the caller's link permissions.
+    #[serde(default)]
+    pub tools: Vec<String>,
     /// The user's home directory, for hubs that address files under it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub home: String,

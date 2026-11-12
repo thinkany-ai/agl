@@ -1,5 +1,10 @@
 # Web products
 
+For a web application that owns its model calls and agent loop, use the
+[built-in local tools](local-tools.md) over this same link. The user only
+needs agl installed; `tools.list` works even when no coding agent is available.
+
+
 The user runs one command on their machine. agl installs, gets autostart, and
 **dials out** to your server over WebSocket, so it works behind NAT with no
 inbound port. Your backend then drives that machine's agents and relays events

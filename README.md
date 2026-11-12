@@ -2,8 +2,9 @@
 
 English | [简体中文](README.zh-CN.md)
 
-agl is a single Rust binary (about 4 MB) that drives the coding agents installed on a machine: Claude Code, Codex, Gemini, Kimi, OpenCode, Grok, Cursor and more.
+agl is a single Rust binary (about 4 MB) that operates on local resources and drives installed coding agents: Claude Code, Codex, Gemini, Kimi, OpenCode, Grok, Cursor and more.
 
+- **Use your own cloud model:** built-in `read`, `write`, `edit` and `exec` tools operate on local resources with no coding agent installed. Your app owns the model calls and agent loop.
 - **Run agents well:** persistent warm sessions, concurrency and queueing, approvals, mid-turn steering, interrupts, model lists and automatic garbage collection.
 - **Reach them from the web:** one `curl … | sh` links any machine to your web app, so the web page and the agents on that machine talk both ways.
 
@@ -20,6 +21,7 @@ The design draws on [botiverse/oar](https://github.com/botiverse/oar) and on the
 
 | | |
 |---|---|
+| **Built-in local tools** | Four discoverable tools for cloud agent loops, independent of installed agents. Exact text edits, paged reads, cancellable commands, incremental output and execution-ID deduplication. |
 | **One protocol, 11+ agents** | Each agent is driven through its best first-party interface. Any ACP-speaking CLI can be added through config. |
 | **Warm sessions, reused context** | The agent process stays alive between turns. After it is suspended, or after a daemon restart, native resume continues the same conversation. Measured: Claude's time to first token drops from about 6s to about 1s per turn. |
 | **Reusable sessions** | Sessions can be reused by name (`-s name`). The CLI, desktop apps and the web share the same sessions, so one can pick up where another left off. History is persisted, with a resume cursor. |
@@ -79,6 +81,7 @@ How each kind of product uses agl:
 |---|---|---|
 | Desktop app (Electron, native), agents only needed while it's open | Bundle agl as a sidecar: `agl daemon --port 0 --parent-pid <pid>` with its own `AGL_HOME` | [desktop-app.md](skills/agl-integration/references/desktop-app.md) |
 | Rust desktop app (Tauri, GPUI) | Link the `agl` crate and use `Manager` in-process | [desktop-app.md#rust-in-process](skills/agl-integration/references/desktop-app.md#rust-in-process) |
+| Cloud app with its own model / agent loop | Install agl and call `tools.list` / `tools.call`; no agent session or local model key | [local-tools.md](skills/agl-integration/references/local-tools.md) |
 | Web product | The user runs `curl …/install.sh?code=… \| sh`; the machine dials out to your backend | [web-product.md](skills/agl-integration/references/web-product.md) |
 | Any product that only needs the list of installed agents | `agl agents --json` (no daemon), or `agents.list` | [discovery.md](skills/agl-integration/references/discovery.md) |
 | Existing runtime or daemon | Keep your own pairing and transport; replace only the execution layer with agl | [existing-runtime.md](skills/agl-integration/references/existing-runtime.md) |
