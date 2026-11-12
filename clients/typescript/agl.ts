@@ -102,6 +102,20 @@ export type BuiltinToolName = "read" | "write" | "edit" | "exec";
 export interface BuiltinTool {
   name: BuiltinToolName; description: string; input_schema: Record<string, unknown>;
 }
+/** agl 0.3.15+: a tools.call held for the person's approval (`approvals: true`). */
+export interface ApprovalRequired {
+  status: "approval_required"; approval_id: string; tool: BuiltinToolName; title: string;
+  options: ("allow" | "allow_session" | "deny")[]; expires_at: number;
+}
+export function isApprovalRequired(r: unknown): r is ApprovalRequired {
+  return typeof r === "object" && r !== null && (r as { status?: unknown }).status === "approval_required";
+}
+export interface ToolCallOptions {
+  /** Hold calls the link allows only with approval instead of refusing them (0.3.15+). */
+  approvals?: boolean;
+  /** Scopes an `allow_session` answer, e.g. your conversation id. */
+  session?: string;
+}
 export interface ReadFileOptions { offset?: number; limit?: number }
 export interface TextFileResult {
   content: string; size: number; offset: number; lines: number;
@@ -358,9 +372,13 @@ export class AglClient {
 
   agents = (opts: { check_updates?: boolean } = {}) => this.call<AgentInfo[]>("agents.list", opts);
   /** Schemas filtered by this connection's access; map input_schema to your model provider's parameters field. */
-  tools = () => this.call<BuiltinTool[]>("tools.list");
-  callTool = <T = unknown>(name: BuiltinToolName, args: Record<string, unknown>) =>
-    this.call<T>("tools.call", { name, arguments: args });
+  tools = (opts: { approvals?: boolean } = {}) => this.call<BuiltinTool[]>("tools.list", opts);
+  /** With `approvals`, the result may be `ApprovalRequired`: answer it with approveTool. */
+  callTool = <T = unknown>(name: BuiltinToolName, args: Record<string, unknown>, opts: ToolCallOptions = {}) =>
+    this.call<T | ApprovalRequired>("tools.call", { name, arguments: args, ...opts });
+  /** Answers a held call; allow / allow_session return the tool's result. */
+  approveTool = <T = unknown>(approvalId: string, decision: "allow" | "allow_session" | "deny") =>
+    this.call<T>("tools.approve", { approval_id: approvalId, decision });
   readFile = (path: string, opts: ReadFileOptions = {}) => this.call<TextFileResult>("fs.read", { path, encoding: "utf8", ...opts });
   writeFile = (path: string, content: string) => this.call<{ size: number }>("fs.write", { path, content });
   editFile = (path: string, oldText: string, newText: string) =>

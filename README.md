@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 agl is a single Rust binary (about 4 MB) that operates on local resources and drives installed coding agents: Claude Code, Codex, Gemini, Kimi, OpenCode, Grok, Cursor and more.
 
-- **Use your own cloud model:** built-in `read`, `write`, `edit` and `exec` tools operate on local resources with no coding agent installed. Your app owns the model calls and agent loop.
+- **Use your own cloud model:** built-in `read`, `write`, `edit` and `exec` tools operate on local resources with no coding agent installed. Your app owns the model calls and agent loop; writes and commands can wait for the person's approval.
 - **Run agents well:** persistent warm sessions, concurrency and queueing, approvals, mid-turn steering, interrupts, model lists and automatic garbage collection.
 - **Reach them from the web:** one `curl … | sh` links any machine to your web app, so the web page and the agents on that machine talk both ways.
 

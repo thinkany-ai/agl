@@ -3,14 +3,18 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{allowed, link_app, Runtime};
+use super::approvals::{self, Gate};
+use super::{link_app, Runtime};
 use crate::{config::Config, session::Origin};
 
 pub fn names() -> Vec<String> {
     ["read", "write", "edit", "exec"].into_iter().map(String::from).collect()
 }
 
-pub fn list(cfg: &Config, origin: &Origin) -> Value {
+/// `tools.list {approvals?}`: the tools this caller may call, each
+/// description saying when it waits for the person (see approvals.rs).
+pub fn list(cfg: &Config, origin: &Origin, params: &Value) -> Value {
+    let opted_in = params.get("approvals").and_then(Value::as_bool).unwrap_or(false);
     let tools = [
         ("read", "fs.read", "Read a local UTF-8 file. Paths are absolute or start with ~/. Results are limited to 64 KiB and include next_offset for continuation.", json!({
             "path": {"type":"string"}, "offset":{"type":"integer","minimum":1,"default":1},
@@ -34,38 +38,74 @@ pub fn list(cfg: &Config, origin: &Origin) -> Value {
             "wait_ms":{"type":"integer","minimum":0,"maximum":30000,"default":1000}
         }), vec![]),
     ];
-    Value::Array(tools.into_iter().filter(|(_, method, ..)| allowed(cfg, origin, method).is_ok()).map(|(name, _, description, properties, required)| {
-        json!({"name":name,"description":description,"input_schema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})
-    }).collect())
+    Value::Array(
+        tools
+            .into_iter()
+            .filter_map(|(name, _, description, properties, required)| {
+                let note = approvals::offered(cfg, origin, name, opted_in)?;
+                Some(json!({"name":name,"description":format!("{description}{note}"),"input_schema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}}))
+            })
+            .collect(),
+    )
 }
 
+/// `tools.call {name, arguments, approvals?, session?}`. `session` scopes
+/// an `allow_session` answer (the hub's conversation, any opaque string).
 pub async fn call(runtime: &Runtime, cfg: &Config, origin: &Origin, params: Value) -> Result<Value> {
     #[derive(Deserialize)]
     struct Call {
         name: String,
         arguments: Value,
+        #[serde(default)]
+        approvals: bool,
+        #[serde(default)]
+        session: String,
     }
     let p: Call = serde_json::from_value(params).context("tools.call params")?;
-    let mut args = p.arguments;
+    if !names().contains(&p.name) {
+        bail!("unknown built-in tool `{}`", p.name);
+    }
+    if !p.arguments.is_object() {
+        bail!("arguments must be an object");
+    }
+    match approvals::gate(cfg, origin, &p.name, &p.arguments, p.approvals) {
+        Gate::Allow => run(runtime, cfg, origin, &p.name, p.arguments).await,
+        Gate::Deny(e) => bail!(e),
+        Gate::Ask(_) if runtime.approvals.granted(origin, &p.session, &p.name) => run(runtime, cfg, origin, &p.name, p.arguments).await,
+        Gate::Ask(title) => Ok(runtime.approvals.hold(origin, &p.session, &p.name, p.arguments, title)),
+    }
+}
+
+/// `tools.approve {approval_id, decision}`: answers a held call. allow /
+/// allow_session run it and return its result; deny fails it.
+pub async fn approve(runtime: &Runtime, cfg: &Config, origin: &Origin, params: Value) -> Result<Value> {
+    let id = params.get("approval_id").and_then(Value::as_str).context("approval_id is required")?;
+    let decision = params.get("decision").and_then(Value::as_str).context("decision is required")?;
+    let (name, args) = runtime.approvals.take(origin, id, decision)?;
+    // The link may have been changed meanwhile; its ceiling still holds.
+    if let Gate::Deny(e) = approvals::gate(cfg, origin, &name, &args, true) {
+        bail!(e);
+    }
+    run(runtime, cfg, origin, &name, args).await
+}
+
+/// Runs one built-in tool; the caller has checked it may.
+async fn run(runtime: &Runtime, cfg: &Config, origin: &Origin, name: &str, mut args: Value) -> Result<Value> {
     let object = args.as_object_mut().context("arguments must be an object")?;
-    match p.name.as_str() {
+    match name {
         "read" => {
-            allowed(cfg, origin, "fs.read")?;
             object.insert("encoding".into(), json!("utf8"));
             super::read(args).await
         }
         "write" | "edit" => {
-            let method = if p.name == "write" { "fs.write" } else { "fs.edit" };
-            allowed(cfg, origin, method)?;
             let _guard = runtime.files.lock().await;
-            if p.name == "write" {
+            if name == "write" {
                 super::write(args).await
             } else {
                 super::edit(args).await
             }
         }
         "exec" => {
-            allowed(cfg, origin, "exec")?;
             let action = object.remove("action").unwrap_or(json!("start"));
             match action.as_str() {
                 Some("start") => {
@@ -92,6 +132,6 @@ pub async fn call(runtime: &Runtime, cfg: &Config, origin: &Origin, params: Valu
                 _ => bail!("exec action must be start, read or cancel"),
             }
         }
-        _ => bail!("unknown built-in tool `{}`", p.name),
+        _ => bail!("unknown built-in tool `{name}`"),
     }
 }

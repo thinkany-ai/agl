@@ -476,7 +476,7 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
             serde_json::to_value(mgr.history(&sid()?, after, limit)?)?
         }
         "gc.run" if local => mgr.gc(params["idle"].as_bool().unwrap_or(false)).await,
-        "tools.list" | "tools.call" | "fs.read" | "fs.write" | "fs.edit" | "exec" | "exec.start" | "exec.read" | "exec.cancel" => {
+        "tools.list" | "tools.call" | "tools.approve" | "fs.read" | "fs.write" | "fs.edit" | "exec" | "exec.start" | "exec.read" | "exec.cancel" => {
             d.tools.dispatch(&mgr.cfg(), origin, method, params).await?
         }
         other => return Err(anyhow!("unknown method `{other}`")),

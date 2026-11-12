@@ -3,7 +3,8 @@
 //! agents' work (attachments in, artifacts out) or run their own tools there.
 //!
 //! Local clients may do all of it. A hub only as far as its link's access
-//! allows, since nobody is asked first (see `allowed`).
+//! allows (see `allowed`). Through `tools.call`, a hub that opts in may
+//! also hold a call for the person's approval (see approvals.rs).
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -18,6 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::config::Config;
 use crate::session::Origin;
 
+pub mod approvals;
 mod executions;
 mod tools;
 pub use executions::Executions;
@@ -27,16 +29,20 @@ pub use tools::names as tool_names;
 #[derive(Default)]
 pub struct Runtime {
     pub executions: Executions,
+    pub approvals: approvals::Approvals,
     files: tokio::sync::Mutex<()>,
 }
 
 impl Runtime {
     pub async fn dispatch(&self, cfg: &Config, origin: &Origin, method: &str, params: Value) -> Result<Value> {
         if method == "tools.list" {
-            return Ok(tools::list(cfg, origin));
+            return Ok(tools::list(cfg, origin, &params));
         }
         if method == "tools.call" {
             return tools::call(self, cfg, origin, params).await;
+        }
+        if method == "tools.approve" {
+            return tools::approve(self, cfg, origin, params).await;
         }
         allowed(cfg, origin, method)?;
         match method {

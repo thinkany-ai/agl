@@ -152,8 +152,9 @@ vanish for its own creator; `"shared"` (the default) is accepted.
 | `session.get` / `session.list` | `{session_id}` / – | `SessionMeta` / `SessionMeta[]`, most recent first |
 | `session.history` | `{session_id, after_seq?, limit?}` | `EventEnvelope[]`. Consecutive `text_delta` events are merged. History is persisted, so it survives a daemon restart, unless the session was created with `history: false` ([History](#history)). |
 | `session.close` | `{session_id}` | Kills the process and deletes the session. |
-| `tools.list` | – | From 0.3.14. Four built-in tool schemas `{name, description, input_schema}`, filtered by link access. No installed agent needed. See [Local tools](local-tools.md). |
-| `tools.call` | `{name, arguments}` | From 0.3.14. Execute `read`, `write`, `edit` or `exec` for an application that owns its own model/agent loop. Returns the result directly. See [Local tools](local-tools.md). |
+| `tools.list` | `{approvals?}` | From 0.3.14. Four built-in tool schemas `{name, description, input_schema}`, filtered by link access. No installed agent needed. With `approvals: true` (0.3.15) it also lists the tools that wait for the person's approval on this link. See [Local tools](local-tools.md). |
+| `tools.call` | `{name, arguments, approvals?, session?}` | From 0.3.14. Execute `read`, `write`, `edit` or `exec` for an application that owns its own model/agent loop. Returns the result directly, or, with `approvals: true` (0.3.15), `{status: "approval_required", approval_id, tool, title, options, expires_at}` for a call the person must approve first. `session` scopes `allow_session`. See [Local tools](local-tools.md#approvals). |
+| `tools.approve` | `{approval_id, decision}` | From 0.3.15. Answers a held call: `allow` / `allow_session` run it and return its result, `deny` fails it. Only the hub that made the call may answer. |
 | `fs.edit` | `{path, old_text, new_text}` | From 0.3.14. Exact UTF-8 replacement; fails without writing unless the nonempty old text matches once. `{size, replacements: 1}`. |
 | `exec.start` | `{argv? or command?, cwd?, timeout_ms?, env?, stdin?, app_name?, execution_id?}` | From 0.3.14. Starts a bounded, caller-owned execution and returns `{execution_id}`. Stable IDs deduplicate retries within retention. |
 | `exec.read` | `{execution_id, stdout_offset?, stderr_offset?, limit?, wait_ms?}` | From 0.3.14. Incremental output and execution status; byte cursors, long polling, no event subscription. See [Local tools](local-tools.md). |
@@ -164,7 +165,7 @@ vanish for its own creator; `"shared"` (the default) is accepted.
 
 `fs.*` and `exec` exist from agl 0.3.0. A hub gets them only as far as its
 link's access allows, since nobody is asked first: any link may `fs.read`,
-`edit` and `full` links may `fs.write` / `fs.edit`, and only `full` links may `exec` / `exec.*`. Built-in tools use the same checks and do not emit approval events. From 0.3.14 a machine's `tools` field advertises its built-in tool names independently of `agents`. See [Local tools](local-tools.md) for schemas, execution retention, reconnects, limits and examples.
+`edit` and `full` links may `fs.write` / `fs.edit`, and only `full` links may `exec` / `exec.*`. Built-in tools use the same checks; from 0.3.15 a hub that passes `approvals: true` may also have calls above that held for the person's approval (`tools.approve`), never above `read_only`. From 0.3.14 a machine's `tools` field advertises its built-in tool names independently of `agents`. See [Local tools](local-tools.md) for schemas, execution retention, reconnects, limits and examples.
 
 `session_id` accepts any of: the id, the session name, or an id prefix of at
 least 4 characters.

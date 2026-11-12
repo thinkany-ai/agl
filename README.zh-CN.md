@@ -4,7 +4,7 @@
 
 一个 Rust 单文件二进制（约 4MB），用来操作本地资源、驱动本机的编码 Agent：Claude Code、Codex、Gemini、Kimi、OpenCode、Grok、Cursor 等。它提供：
 
-- 云端应用可通过内置的 `read/write/edit/exec` 四个工具操作本地资源，无需安装其他 Agent；模型调用和任务循环由应用自己负责；
+- 云端应用可通过内置的 `read/write/edit/exec` 四个工具操作本地资源，无需安装其他 Agent；模型调用和任务循环由应用自己负责，写文件和执行命令可以逐次征求用户同意；
 - 常驻热会话、并发与排队、审批、运行中插话（steer）、中断、模型列表、自动垃圾回收；
 - 一条 `curl … | sh` 就能把任意机器接入你的 Web 应用，网页和机器上的 Agent 双向通信。
 

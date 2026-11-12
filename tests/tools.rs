@@ -235,3 +235,85 @@ async fn output_limits_eviction_and_concurrency_are_bounded() {
     assert!(call(&d, "exec.start", json!({"command":"true"}), &Origin::Local).await.unwrap_err().to_string().contains("concurrently"));
     d.tools.executions.shutdown().await;
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn approvals_hold_sensitive_calls_for_the_person() {
+    let d = daemon();
+    let dir = Dir::new();
+    let file = dir.0.join("note.txt");
+    std::fs::write(&file, "hello").unwrap();
+    let ask = hub("c"); // access ask
+    let opted = |name: &str, arguments: Value| json!({"name":name,"arguments":arguments,"approvals":true,"session":"chat-1"});
+    // Hubs below `full` read their executions through tools.call.
+    let completed = |id: &'static str| {
+        let d = d.clone();
+        async move {
+            let (mut out, mut offset) = (String::new(), 0);
+            for _ in 0..100 {
+                let r = call(&d, "tools.call", json!({"name":"exec","arguments":{"action":"read","execution_id":id,"stdout_offset":offset,"wait_ms":100},"approvals":true}), &hub("c")).await.unwrap();
+                out.push_str(r["stdout"].as_str().unwrap());
+                offset = r["stdout_offset"].as_u64().unwrap();
+                if r["status"] == "completed" && r["has_more"] == false {
+                    return out;
+                }
+            }
+            panic!("execution did not complete")
+        }
+    };
+
+    // Opted in, `ask` lists every tool; without the opt-in only read.
+    let list = call(&d, "tools.list", json!({"approvals":true}), &ask).await.unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 4);
+    assert!(list[3]["description"].as_str().unwrap().contains("approval_required"));
+    assert_eq!(call(&d, "tools.list", json!({}), &ask).await.unwrap().as_array().unwrap().len(), 1);
+
+    // Read-only commands run at once.
+    let r = call(&d, "tools.call", opted("exec", json!({"command":"ls | wc -l","cwd":dir.0,"execution_id":"count"})), &ask).await.unwrap();
+    assert_ne!(r["status"], "approval_required");
+    assert_eq!(completed("count").await.trim(), "1");
+
+    // A write waits; deny leaves the file alone.
+    let held = call(&d, "tools.call", opted("write", json!({"path":file,"content":"changed"})), &ask).await.unwrap();
+    assert_eq!(held["status"], "approval_required");
+    assert!(held["title"].as_str().unwrap().starts_with("Write "));
+    let id = held["approval_id"].as_str().unwrap().to_string();
+    // Another hub can't answer it.
+    assert!(call(&d, "tools.approve", json!({"approval_id":id,"decision":"allow"}), &hub("a")).await.is_err());
+    let denied = call(&d, "tools.approve", json!({"approval_id":id,"decision":"deny"}), &ask).await.unwrap_err();
+    assert!(denied.to_string().contains("denied"));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello");
+    // An answered id is gone.
+    assert!(call(&d, "tools.approve", json!({"approval_id":id,"decision":"allow"}), &ask).await.is_err());
+
+    // A command waits; allow runs it and returns its result.
+    let held = call(&d, "tools.call", opted("exec", json!({"command":"echo hi > out.txt","cwd":dir.0,"execution_id":"hi"})), &ask).await.unwrap();
+    assert_eq!(held["status"], "approval_required");
+    assert!(dir.0.join("out.txt").metadata().is_err(), "nothing runs before the answer");
+    let id = held["approval_id"].as_str().unwrap();
+    let r = call(&d, "tools.approve", json!({"approval_id":id,"decision":"allow_session"}), &ask).await.unwrap();
+    assert_eq!(r["execution_id"], "hi");
+    completed("hi").await;
+    assert_eq!(std::fs::read_to_string(dir.0.join("out.txt")).unwrap(), "hi\n");
+    // allow_session covers later commands in the same session only.
+    let r = call(&d, "tools.call", opted("exec", json!({"command":"echo again >> out.txt","cwd":dir.0,"execution_id":"again"})), &ask).await.unwrap();
+    assert_eq!(r["execution_id"], "again");
+    let mut other = opted("exec", json!({"command":"echo other >> out.txt","cwd":dir.0}));
+    other["session"] = json!("chat-2");
+    assert_eq!(call(&d, "tools.call", other, &ask).await.unwrap()["status"], "approval_required");
+
+    // A link lowered to read_only refuses even an approved call.
+    let held = call(&d, "tools.call", opted("edit", json!({"path":file,"old_text":"hello","new_text":"x"})), &ask).await.unwrap();
+    d.mgr.cfg.write().unwrap().hubs[2].access = "read_only".into();
+    let id = held["approval_id"].as_str().unwrap();
+    assert!(call(&d, "tools.approve", json!({"approval_id":id,"decision":"allow"}), &ask).await.unwrap_err().to_string().contains("more access"));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello");
+    assert!(call(&d, "tools.call", opted("exec", json!({"command":"ls"})), &ask).await.is_err());
+
+    // `edit` writes at once and asks only for commands.
+    let edit = hub("b");
+    call(&d, "tools.call", opted("write", json!({"path":file,"content":"by edit"})), &edit).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "by edit");
+    assert_eq!(call(&d, "tools.call", opted("exec", json!({"command":"touch x","cwd":dir.0})), &edit).await.unwrap()["status"], "approval_required");
+    d.tools.executions.shutdown().await;
+}

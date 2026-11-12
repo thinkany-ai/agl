@@ -129,7 +129,8 @@ use the existing process reaper when their tracked root is still alive.
 
 ## Permissions
 
-The existing link policy applies to both `tools.call` and the direct APIs:
+Without approvals (below), the link policy applies to both `tools.call` and
+the direct APIs:
 
 | Caller | Tools exposed by `tools.list` |
 |---|---|
@@ -139,12 +140,64 @@ The existing link policy applies to both `tools.call` and the direct APIs:
 | Hub `full` | All four |
 
 Built-in tools do not emit `session.permission_request` events or create
-agent sessions. A denied call fails immediately. Configure a hub's access
+agent sessions. A denied call fails immediately, unless the hub opted in to
+approvals. Configure a hub's access
 locally with `agl connect … --access full` when command execution is wanted;
 the cloud cannot elevate its own link. Permissions are connection-wide,
 without per-directory scoping. Arbitrary command access also permits file
 access through those commands. macOS system privacy consent still applies;
 file APIs run in the daemon, while named command launches use `app_name`.
+
+## Approvals
+
+From agl 0.3.15, a hub may pass `approvals: true` to `tools.list` and
+`tools.call`. Then a call the link doesn't allow outright, but that the
+person could allow, is held instead of refused:
+
+| Access | Runs at once | Waits for the person |
+|---|---|---|
+| `read_only` | `read` | – (nothing else is offered) |
+| `ask` | `read`, read-only commands | `write`, `edit`, other commands |
+| `edit` | `read`, `write`, `edit`, read-only commands | other commands |
+| `full` | all four | – |
+
+Read-only commands are decided by agl, never by the hub or the model: a
+plain command or `|` pipeline of `ls`, `cat`, `head`, `tail`, `wc`, `du`,
+`df`, `stat`, `find` (no `-exec`/`-delete`/`-fprint…`), `grep`/`rg`, `sort`
+(no `-o`), `mdfind`, `git status/log/show/diff/…` and a few more, with no
+`env`, no redirection except `2>/dev/null` / `2>&1`, and no `;`, `&&`, `$`,
+backticks or subshells. Anything else waits.
+
+A held call answers at once:
+
+```json
+{"status": "approval_required", "approval_id": "…", "tool": "exec",
+ "title": "Run: rm ~/Downloads/old.dmg", "options": ["allow", "allow_session", "deny"],
+ "expires_at": 1762930000000}
+```
+
+Show `title` to the person, then answer with
+`tools.approve {approval_id, decision}`: `allow` and `allow_session` run the
+call and return its normal result; `deny` fails it with an error to hand to
+the model. `allow_session` also lets later calls of the same tool with the
+same `session` (any string the hub passes, e.g. its conversation id) run
+without asking, for an hour; `session` empty means no such grants. Held calls
+expire after ten minutes. Only the hub that made the call may answer it, and
+the link's access is checked again when it runs, so a link lowered meanwhile
+still refuses.
+
+The answer travels through the hub, as `session.approve` does for agent
+sessions: agl trusts the hub to relay the person's decision. What the hub
+can never do is go above the link's access; `read_only` stays read-only.
+
+```ts
+const tools = await machine.tools({ approvals: true });
+let r = await machine.callTool("exec", { command: "rm old.dmg", cwd: "~/Downloads" }, { approvals: true, session: chatId });
+if (isApprovalRequired(r)) {
+  const ok = await askThePerson(r.title);
+  r = await machine.approveTool(r.approval_id, ok ? "allow" : "deny");
+}
+```
 
 ## Rust embedding
 
