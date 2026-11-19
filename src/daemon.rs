@@ -470,6 +470,16 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
         }
         "session.get" => serde_json::to_value(for_caller(mgr.get(&sid()?)?, origin))?,
         "session.list" => serde_json::to_value(mgr.list().into_iter().filter(|m| origin.can_see(m)).map(|m| for_caller(m, origin)).collect::<Vec<_>>())?,
+        "session.upload_file" => {
+            crate::machine::allowed(&mgr.cfg(), origin, method)?;
+            let session = mgr.get(&sid()?)?;
+            crate::session_file::upload(
+                &session.cwd,
+                str_param(&params, "path")?,
+                str_param(&params, "upload_url")?,
+            )
+            .await?
+        }
         "session.history" => {
             let after = params["after_seq"].as_u64().unwrap_or(0);
             let limit = params["limit"].as_u64().map(|n| n as usize);

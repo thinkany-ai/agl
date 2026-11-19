@@ -17,5 +17,6 @@ pub mod protocol;
 pub mod proxy;
 pub mod service;
 pub mod session;
+mod session_file;
 pub mod shellenv;
 pub mod update;
