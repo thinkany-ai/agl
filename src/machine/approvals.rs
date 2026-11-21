@@ -136,6 +136,8 @@ struct Held {
     hub: String,
     session: String,
     tool: String,
+    /// What `allow_session` covers: the tool, or `computer:<bundle id>`.
+    scope: String,
     args: Value,
     at: Instant,
 }
@@ -155,7 +157,8 @@ fn hub_url(origin: &Origin) -> String {
 }
 
 impl Approvals {
-    /// Whether an earlier `allow_session` covers `tool` in `session`.
+    /// Whether an earlier `allow_session` covers `tool` (a tool name, or
+    /// `computer:<bundle id>`) in `session`.
     pub fn granted(&self, origin: &Origin, session: &str, tool: &str) -> bool {
         if session.is_empty() {
             return false;
@@ -186,8 +189,9 @@ impl Approvals {
         g.insert((hub_url(origin), session.to_string(), tool.to_string()), Instant::now());
     }
 
-    /// Holds a call and returns the answer for the hub.
-    pub fn hold(&self, origin: &Origin, session: &str, tool: &str, args: Value, title: String) -> Value {
+    /// Holds a call and returns the answer for the hub. `allow_session`
+    /// will cover `scope`.
+    pub fn hold(&self, origin: &Origin, session: &str, tool: &str, scope: &str, args: Value, title: String) -> Value {
         let id = uuid::Uuid::new_v4().simple().to_string();
         let mut h = self.held.lock().unwrap();
         h.retain(|_, c| c.at.elapsed() < HOLD_FOR);
@@ -196,7 +200,7 @@ impl Approvals {
                 h.remove(&oldest);
             }
         }
-        h.insert(id.clone(), Held { hub: hub_url(origin), session: session.into(), tool: tool.into(), args, at: Instant::now() });
+        h.insert(id.clone(), Held { hub: hub_url(origin), session: session.into(), tool: tool.into(), scope: scope.into(), args, at: Instant::now() });
         let mut options = vec!["allow"];
         if !session.is_empty() {
             options.push("allow_session");
@@ -225,10 +229,11 @@ impl Approvals {
             bail!("approval `{id}` expired; call the tool again");
         }
         if decision == "deny" {
-            bail!("the person denied this: {}", title(&held.tool, &held.args));
+            let what = held.args.pointer("/_agl/title").and_then(Value::as_str).map(String::from).unwrap_or_else(|| title(&held.tool, &held.args));
+            bail!("the person denied this: {what}");
         }
         if decision == "allow_session" {
-            self.grant(origin, &held.session, &held.tool);
+            self.grant(origin, &held.session, &held.scope);
         }
         Ok((held.tool, held.args))
     }

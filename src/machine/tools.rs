@@ -4,11 +4,18 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::approvals::{self, Gate};
+use super::computer;
 use super::{link_app, Runtime};
 use crate::{config::Config, session::Origin};
 
+/// The built-in tools: the four file and command tools, and on macOS the
+/// computer-use tools.
 pub fn names() -> Vec<String> {
-    ["read", "write", "edit", "exec"].into_iter().map(String::from).collect()
+    let mut n: Vec<String> = ["read", "write", "edit", "exec"].into_iter().map(String::from).collect();
+    if crate::computer::supported() {
+        n.extend(crate::computer::TOOLS.iter().map(|s| s.to_string()));
+    }
+    n
 }
 
 /// `tools.list {approvals?}`: the tools this caller may call, each
@@ -38,15 +45,15 @@ pub fn list(cfg: &Config, origin: &Origin, params: &Value) -> Value {
             "wait_ms":{"type":"integer","minimum":0,"maximum":30000,"default":1000}
         }), vec![]),
     ];
-    Value::Array(
-        tools
-            .into_iter()
-            .filter_map(|(name, _, description, properties, required)| {
-                let note = approvals::offered(cfg, origin, name, opted_in)?;
-                Some(json!({"name":name,"description":format!("{description}{note}"),"input_schema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}}))
-            })
-            .collect(),
-    )
+    let mut list: Vec<Value> = tools
+        .into_iter()
+        .filter_map(|(name, _, description, properties, required)| {
+            let note = approvals::offered(cfg, origin, name, opted_in)?;
+            Some(json!({"name":name,"description":format!("{description}{note}"),"input_schema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}}))
+        })
+        .collect();
+    list.extend(computer::list(cfg, origin, opted_in));
+    Value::Array(list)
 }
 
 /// `tools.call {name, arguments, approvals?, session?}`. `session` scopes
@@ -60,8 +67,17 @@ pub async fn call(runtime: &Runtime, cfg: &Config, origin: &Origin, params: Valu
         approvals: bool,
         #[serde(default)]
         session: String,
+        /// Return screenshots as base64 `images` (computer tools).
+        #[serde(default)]
+        images: bool,
     }
     let p: Call = serde_json::from_value(params).context("tools.call params")?;
+    if computer::is_tool(&p.name) {
+        if !p.arguments.is_object() {
+            bail!("arguments must be an object");
+        }
+        return computer::call(runtime, cfg, origin, &p.name, p.arguments, p.approvals, &p.session, p.images).await;
+    }
     if !names().contains(&p.name) {
         bail!("unknown built-in tool `{}`", p.name);
     }
@@ -72,7 +88,7 @@ pub async fn call(runtime: &Runtime, cfg: &Config, origin: &Origin, params: Valu
         Gate::Allow => run(runtime, cfg, origin, &p.name, p.arguments).await,
         Gate::Deny(e) => bail!(e),
         Gate::Ask(_) if runtime.approvals.granted(origin, &p.session, &p.name) => run(runtime, cfg, origin, &p.name, p.arguments).await,
-        Gate::Ask(title) => Ok(runtime.approvals.hold(origin, &p.session, &p.name, p.arguments, title)),
+        Gate::Ask(title) => Ok(runtime.approvals.hold(origin, &p.session, &p.name, &p.name, p.arguments, title)),
     }
 }
 
@@ -82,6 +98,9 @@ pub async fn approve(runtime: &Runtime, cfg: &Config, origin: &Origin, params: V
     let id = params.get("approval_id").and_then(Value::as_str).context("approval_id is required")?;
     let decision = params.get("decision").and_then(Value::as_str).context("decision is required")?;
     let (name, args) = runtime.approvals.take(origin, id, decision)?;
+    if computer::is_tool(&name) {
+        return computer::approved(runtime, cfg, origin, &name, args).await;
+    }
     // The link may have been changed meanwhile; its ceiling still holds.
     if let Gate::Deny(e) = approvals::gate(cfg, origin, &name, &args, true) {
         bail!(e);

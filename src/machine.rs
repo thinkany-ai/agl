@@ -20,6 +20,7 @@ use crate::config::Config;
 use crate::session::Origin;
 
 pub mod approvals;
+pub mod computer;
 mod executions;
 mod tools;
 pub use executions::Executions;
@@ -30,6 +31,7 @@ pub use tools::names as tool_names;
 pub struct Runtime {
     pub executions: Executions,
     pub approvals: approvals::Approvals,
+    pub computer: computer::Computer,
     files: tokio::sync::Mutex<()>,
 }
 
@@ -43,6 +45,12 @@ impl Runtime {
         }
         if method == "tools.approve" {
             return tools::approve(self, cfg, origin, params).await;
+        }
+        match method {
+            "computer.permissions" => return self.computer.permissions(cfg, origin, &params).await,
+            "computer.stop" => return Ok(self.computer.stop(origin, &params)),
+            "computer.reset" => return Ok(self.computer.reset(origin, &params)),
+            _ => {}
         }
         allowed(cfg, origin, method)?;
         match method {

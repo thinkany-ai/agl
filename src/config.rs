@@ -56,6 +56,18 @@ pub struct Config {
     /// Directories searched for agent executables before the login shell's
     /// PATH, and put first on the PATH agents run with (absolute or `~/…`).
     pub extra_paths: Vec<String>,
+    /// Computer use (macOS): apps it may never operate. Only editable here,
+    /// never by a hub.
+    pub computer: ComputerConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ComputerConfig {
+    /// More bundle ids to block (`com.example.app`, or a prefix ending in `*`).
+    pub blocked_apps: Vec<String>,
+    /// Built-in blocked bundle ids to allow after all (e.g. a terminal).
+    pub allowed_blocked_apps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,6 +165,7 @@ impl Default for Config {
             history_image_limit: 16,
             custom_agents: Vec::new(),
             extra_paths: Vec::new(),
+            computer: ComputerConfig::default(),
         }
     }
 }

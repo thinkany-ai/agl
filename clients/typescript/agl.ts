@@ -98,7 +98,31 @@ export interface CreateSession {
 }
 
 /** agl 0.3.14+: built-in tools need no installed coding agent or model key. */
-export type BuiltinToolName = "read" | "write" | "edit" | "exec";
+export type BuiltinToolName = "read" | "write" | "edit" | "exec" | ComputerToolName;
+/** agl 0.3.16+ (macOS): operate the Mac's apps in the background. */
+export type ComputerToolName =
+  | "computer_list_apps" | "computer_get_state" | "computer_click" | "computer_type" | "computer_key"
+  | "computer_scroll" | "computer_drag" | "computer_set_value" | "computer_action" | "computer_open_app";
+/** What computer tools (except computer_list_apps) return: the app's state after acting. */
+export interface ComputerState {
+  state_id: string;
+  app: { bundle_id: string; name: string; pid: number };
+  window: { id: number | null; title: string };
+  /** The accessibility tree as text; elements are numbered `[n]`. */
+  tree: string;
+  truncated: boolean;
+  elements: number;
+  /** Screenshot size in pixels; x/y arguments are in these pixels. */
+  screenshot?: { width: number; height: number; scale: number };
+  /** With `images: true` on callTool; otherwise `omitted` placeholders. */
+  images?: ToolImage[];
+  /** What the action did, e.g. "performed AXPress on". */
+  done?: string;
+  /** "stale_state": nothing was done; this is the current state. */
+  error?: string;
+  message?: string;
+  warnings?: string[];
+}
 export interface BuiltinTool {
   name: BuiltinToolName; description: string; input_schema: Record<string, unknown>;
 }
@@ -113,8 +137,28 @@ export function isApprovalRequired(r: unknown): r is ApprovalRequired {
 export interface ToolCallOptions {
   /** Hold calls the link allows only with approval instead of refusing them (0.3.15+). */
   approvals?: boolean;
-  /** Scopes an `allow_session` answer, e.g. your conversation id. */
+  /** Scopes an `allow_session` answer, e.g. your conversation id. Computer
+   * tools also keep their state and `computer.stop` per session. */
   session?: string;
+  /** Computer tools: return screenshots as base64 `images` (0.3.16+). */
+  images?: boolean;
+}
+
+/**
+ * Splits a tool result into model content: the JSON (without image data)
+ * as text, then each image. `anthropic` gives Messages API tool_result
+ * blocks; `openai` gives Responses API function_call_output content.
+ */
+export function toModelContent(result: unknown, provider: "anthropic" | "openai" = "anthropic"): unknown[] {
+  const r = (typeof result === "object" && result !== null ? { ...(result as Record<string, unknown>) } : { value: result }) as Record<string, unknown>;
+  const images = (Array.isArray(r.images) ? r.images : []) as ToolImage[];
+  delete r.images;
+  const text = JSON.stringify(r);
+  const shown = images.filter((i) => !i.omitted && i.data);
+  if (provider === "openai") {
+    return [{ type: "input_text", text }, ...shown.map((i) => ({ type: "input_image", image_url: `data:${i.mime_type};base64,${i.data}` }))];
+  }
+  return [{ type: "text", text }, ...shown.map((i) => ({ type: "image", source: { type: "base64", media_type: i.mime_type, data: i.data } }))];
 }
 export interface ReadFileOptions { offset?: number; limit?: number }
 export interface TextFileResult {
@@ -379,6 +423,13 @@ export class AglClient {
   /** Answers a held call; allow / allow_session return the tool's result. */
   approveTool = <T = unknown>(approvalId: string, decision: "allow" | "allow_session" | "deny") =>
     this.call<T>("tools.approve", { approval_id: approvalId, decision });
+  /** 0.3.16+ (macOS): Accessibility and Screen Recording for this link's product; `request` asks macOS and opens System Settings. */
+  computerPermissions = (opts: { request?: boolean } = {}) =>
+    this.call<{ accessibility: "granted" | "denied"; screen_recording: "granted" | "denied"; app_name: string }>("computer.permissions", opts);
+  /** The person pressed stop: computer tools in `session` fail with stopped_by_user until computerReset. */
+  computerStop = (session = "") => this.call<{ ok: boolean }>("computer.stop", { session });
+  /** Call when the person sends their next message after a stop. */
+  computerReset = (session = "") => this.call<{ ok: boolean }>("computer.reset", { session });
   readFile = (path: string, opts: ReadFileOptions = {}) => this.call<TextFileResult>("fs.read", { path, encoding: "utf8", ...opts });
   writeFile = (path: string, content: string) => this.call<{ size: number }>("fs.write", { path, content });
   editFile = (path: string, oldText: string, newText: string) =>

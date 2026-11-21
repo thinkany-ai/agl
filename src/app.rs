@@ -169,7 +169,8 @@ fn ensure_bundle(root: &Path, name: &str) -> Result<PathBuf> {
 
 static CAN_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Run as a launcher when agl was started as one (`__hold` / `__held`):
+/// Run as a launcher when agl was started as one (`__hold` / `__held`), or
+/// as the computer-use helper (`__computer`):
 /// returns the exit code to exit with, or `None` for an ordinary agl run.
 /// Call it before anything else in `main`; an app embedding agl's session
 /// manager does the same to give its sessions' `app_name` effect.
@@ -192,7 +193,16 @@ pub fn hold_from_args() -> Option<i32> {
     if mode == HELD_ARG {
         return Some(hold(&rest));
     }
+    if mode == crate::computer::HELPER_ARG {
+        return Some(crate::computer::helper_main());
+    }
     None
+}
+
+/// Whether this executable handles `__hold` and `__computer` (its `main`
+/// called `hold_from_args` first thing).
+pub fn can_hold() -> bool {
+    CAN_HOLD.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Replace this process with `<self> __held <rest>`, responsible for itself.

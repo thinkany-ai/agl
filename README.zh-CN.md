@@ -21,7 +21,7 @@
 
 | | |
 |---|---|
-| **内置本地工具** | 为云端 Agent 循环提供四个可发现工具，无需本地 Agent：分段读取、精确编辑、可取消命令、增量输出和执行 ID 去重。[接入说明](skills/agl-integration/references/local-tools.md) |
+| **内置本地工具** | 为云端 Agent 循环提供可发现的工具，无需本地 Agent：分段读取、精确编辑、可取消命令、增量输出和执行 ID 去重。macOS 上另有 `computer_*` 工具，通过辅助功能在后台操作 App，带截图和按 App 审批。[接入说明](skills/agl-integration/references/local-tools.md) |
 | **一套协议驱动 11+ 种 Agent** | 每个 Agent 都用它最好的第一方接口；还可以通过配置接入任意支持 ACP 的 CLI |
 | **热会话、复用上下文** | 两轮之间进程不退出；被回收或重启后用原生 resume 接上原对话。实测 claude 每轮首字从约 6s 降到约 1s |
 | **复用会话** | 用名字复用（`-s name`）。CLI、桌面 App、网页共用同一批会话，可以互相接着聊；会话历史落盘，带续传游标 |

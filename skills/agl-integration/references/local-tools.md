@@ -132,6 +132,8 @@ use the existing process reaper when their tracked root is still alive.
 Without approvals (below), the link policy applies to both `tools.call` and
 the direct APIs:
 
+Computer tools have their own rules, see [Computer use](#computer-use-macos-agl-0316).
+
 | Caller | Tools exposed by `tools.list` |
 |---|---|
 | Local client | All four |
@@ -198,6 +200,74 @@ if (isApprovalRequired(r)) {
   r = await machine.approveTool(r.approval_id, ok ? "allow" : "deny");
 }
 ```
+
+## Computer use (macOS, agl 0.3.16+)
+
+Ten `computer_*` tools let the cloud model operate the Mac's apps the way
+Codex's Computer Use does, with no coding agent installed: it reads a
+window's accessibility tree and screenshot, then presses, types and scrolls
+**in the background**, without taking over the person's pointer or focus.
+
+| Tool | Arguments (besides `app`) | Does |
+|---|---|---|
+| `computer_list_apps` | – (no `app`) | `{apps: [{bundle_id, name, pid, windows: [{id, title, focused}], blocked}]}` |
+| `computer_get_state` | `window?, screenshot?, max_elements?` | The state: `state_id`, `tree` (text, elements numbered `[n]`), screenshot in `images` |
+| `computer_click` | `element` or `x, y`; `button?, count?, foreground?` | Presses / selects through accessibility; a point is hit-tested to its element |
+| `computer_type` | `text, element?, via?, foreground?` | Inserts at the cursor (accessibility), or key events with `via: "keys"` |
+| `computer_key` | `keys` (`"cmd+l"`, `"shift+tab return"`), `foreground?` | Shortcuts go through the app's menu when it is in the background |
+| `computer_scroll` | `direction, amount?, element? / x, y` | Scroll wheel at that place |
+| `computer_drag` | `from, to` (`{element}` or `{x, y}`) | Always in the foreground (moves the real pointer) |
+| `computer_set_value` | `element, value` | Sets AXValue: text fields, sliders, pop-ups |
+| `computer_action` | `element, action` | Any other AX action (`AXShowMenu`, `AXIncrement`, …) |
+| `computer_open_app` | – | Starts or activates an app (also not running), returns its state |
+
+`app` is a `bundle_id` (preferred) or name, localized or not ("Notes",
+"备忘录"). Actions take `state_id` (the state their element numbers come
+from) and return the new state with `done` saying what happened; pass
+`return_state: false` to skip it and `screenshot: false` for tree only.
+Coordinates are pixels of the last screenshot. When the app changed
+since `state_id`, nothing is done and the result has `error: "stale_state"`
+with the current state. When a background action has no effect,
+`foreground: true` brings the app to the front and uses the real pointer
+and keyboard. The tool descriptions carry guidance for the model.
+
+```ts
+const tools = await machine.tools({ approvals: true });   // includes computer_* on macOS
+let r = await machine.callTool("computer_get_state", { app: "com.apple.Notes" },
+  { approvals: true, session: chatId, images: true });
+if (isApprovalRequired(r)) r = await machine.approveTool(r.approval_id, await ask(r.title));
+// Anthropic: tool_result content; OpenAI: toModelContent(r, "openai")
+const content = toModelContent(r);
+```
+
+**Images** come back only with `images: true` on `tools.call` (JPEG, long
+edge at most 1568 px); otherwise they are `{mime_type, omitted: true}`, so
+older hubs don't paste base64 into the model's context.
+
+**Who may use it.** Local clients and `full` links: everything. `ask` and
+`edit` links: only with `approvals: true`, and the first use of **each app**
+waits for the person (`title: "Use Notes (com.apple.Notes)"`);
+`allow_session` keeps that app for the `session` for an hour, other apps
+still ask. `read_only`: not offered. Terminals, password managers, System
+Settings and agl's own launchers are never operated (`blocked: true`,
+error `app_blocked`); the person can change that in `config.json`
+(`computer.blocked_apps`, `computer.allowed_blocked_apps`, bundle ids or
+prefixes ending in `*`), a hub cannot.
+
+**Stop.** When the person presses stop, call `computer.stop {session}`:
+later calls in that session fail with `stopped_by_user` (the model is told
+to wait). Call `computer.reset {session}` with their next message.
+
+**macOS permissions.** The work happens in a helper process (`agl
+__computer`) started through the link's product launcher (see
+[App name](protocol.md#app-name-macos-privacy-prompts)), so macOS asks for
+**Accessibility** and **Screen Recording** in the product's name and keeps
+the grants per product. Until both are granted, tools fail with
+`permission_missing: accessibility`, or return the tree with a
+`permission_missing: screen_recording` warning and no screenshot. Check
+with `computer.permissions {}` and guide the person with
+`computer.permissions {request: true}`, which shows macOS's prompt and
+opens System Settings. Linux and Windows: not offered.
 
 ## Rust embedding
 

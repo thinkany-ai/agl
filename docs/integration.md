@@ -8,3 +8,4 @@
 - [已有运行时](../skills/agl-integration/references/existing-runtime.md)：只替换执行层的迁移步骤
 - [协议参考](../skills/agl-integration/references/protocol.md)：方法、事件、权限档位、配置项
 - [方案对比与实测](comparison.md)
+- [设计草案：内置 computer-use 与 browser-use](computer-use.md)

@@ -164,7 +164,8 @@ async fn linked_machine_runs_a_turn(transport: &str, max_body: Option<usize>) {
 
     // Built-in tools use the same two transports and need no agent session.
     let tools = ui.call(Some(MACHINE_ID), "tools.list", json!({})).await;
-    assert_eq!(tools.as_array().unwrap().len(), 4);
+    // The four file and command tools, plus computer use on macOS.
+    assert_eq!(tools.as_array().unwrap().len(), if cfg!(target_os = "macos") { 14 } else { 4 });
     let tool_file = machine_home.join("tools.txt");
     ui.call(Some(MACHINE_ID), "tools.call", json!({"name":"write","arguments":{"path":tool_file,"content":"hello tools"}})).await;
     ui.call(Some(MACHINE_ID), "tools.call", json!({"name":"edit","arguments":{"path":tool_file,"old_text":"hello","new_text":"你好"}})).await;

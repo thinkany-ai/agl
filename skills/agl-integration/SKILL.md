@@ -17,10 +17,11 @@ interface:
 
 Your product never parses agent output itself.
 
-For a product with its own cloud model and agent loop, use the four
+For a product with its own cloud model and agent loop, use the
 [built-in local tools](references/local-tools.md): `tools.list` / `tools.call`.
 No installed coding agent or agent session is required. The application owns
-model calls; agl executes `read`, `write`, `edit` and `exec`.
+model calls; agl executes `read`, `write`, `edit` and `exec`, and on macOS the
+`computer_*` tools for operating apps (computer use, 0.3.16+).
 
 ## 1. Pick the integration shape
 
