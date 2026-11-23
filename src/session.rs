@@ -455,7 +455,7 @@ impl Manager {
         // A hub's new conversation may get a data home of its own; one that
         // resumes a conversation stays where that conversation is.
         let agent_home = match &origin {
-            Origin::Hub { url, .. } if p.resume.is_none() && cfg.isolated_agents_on(url) => agents::isolation::home_for(def.protocol),
+            Origin::Hub { url, .. } if p.resume.is_none() && cfg.isolated_agents_on(url) => agents::isolation::home_for(&def),
             _ => None,
         };
         let now = now_ms();
@@ -477,7 +477,7 @@ impl Manager {
             live: false,
             pending_approvals: 0,
             allow_session: false,
-            features: def.protocol.features(),
+            features: def.features(),
             use_login: false,
             origin: origin.tag(),
             visibility,
@@ -762,7 +762,7 @@ fn check_launch(def: &agents::AgentDef, extra_args: &[String], instructions: Opt
     if extra_args.iter().any(|a| a.contains('\0')) {
         bail!("`extra_args` entries cannot contain NUL bytes");
     }
-    let features = def.protocol.features();
+    let features = def.features();
     let supports = |f: &str| features.iter().any(|x| x == f);
     if let Some(text) = instructions {
         if !supports("instructions") {

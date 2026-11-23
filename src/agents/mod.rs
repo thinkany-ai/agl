@@ -81,6 +81,38 @@ pub struct AgentDef {
     pub env: Vec<(String, String)>,
 }
 
+impl AgentDef {
+    /// What this agent takes (`Protocol::features`), plus `instructions`
+    /// for the built-in agents whose CLI appends to its own system prompt:
+    /// Pi and OMP (`--append-system-prompt`), Grok (ACP `_meta.rules`).
+    pub fn features(&self) -> Vec<String> {
+        let mut f = self.protocol.features();
+        if self.appends_instructions().is_some() && !f.iter().any(|x| x == "instructions") {
+            f.push("instructions".into());
+        }
+        f
+    }
+
+    /// How a built-in agent outside Claude Code and Codex takes
+    /// `instructions`; None when it does not.
+    pub fn appends_instructions(&self) -> Option<InstructionsVia> {
+        match (self.id.as_str(), self.protocol) {
+            ("pi", Protocol::Pi) | ("omp", Protocol::Acp) => Some(InstructionsVia::AppendSystemPromptFlag),
+            ("grok", Protocol::Acp) => Some(InstructionsVia::AcpMetaRules),
+            _ => None,
+        }
+    }
+}
+
+/// See [`AgentDef::appends_instructions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstructionsVia {
+    /// `--append-system-prompt <text>` on the command line.
+    AppendSystemPromptFlag,
+    /// `_meta.rules` on ACP `session/new` (and load / resume).
+    AcpMetaRules,
+}
+
 fn def(id: &str, name: &str, protocol: Protocol, commands: &[&str], args: &[&str], env: &[(&str, &str)]) -> AgentDef {
     AgentDef {
         id: id.into(),
@@ -434,7 +466,7 @@ pub async fn detect(cfg: &Config, check_updates: bool) -> Vec<AgentInfo> {
                 install: builtin.then(|| install::install_info(&d.id, path.as_deref())).flatten(),
                 path: path.map(|p| p.display().to_string()),
                 version,
-                features: d.protocol.features(),
+                features: d.features(),
                 status: status.into(),
                 desktop_app: desktop_app.map(|p| p.display().to_string()),
                 latest_version,
@@ -602,7 +634,7 @@ pub(crate) fn base_command(bin: &std::path::Path, spec: &SpawnSpec) -> tokio::pr
         cmd.env(k, v);
     }
     if let Some(home) = &spec.agent_home {
-        for (k, v) in isolation::env(spec.def.protocol, home) {
+        for (k, v) in isolation::env(&spec.def, home) {
             cmd.env(k, v);
         }
     }
@@ -1039,6 +1071,19 @@ mod reap_tests {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn instructions_are_taken_by_the_agents_that_append_them() {
+        let reg = registry(&Config::default());
+        let takes = |id: &str| reg.iter().find(|d| d.id == id).unwrap().features().iter().any(|f| f == "instructions");
+        for id in ["claude", "codex", "pi", "omp", "grok"] {
+            assert!(takes(id), "{id}");
+        }
+        for id in ["gemini", "opencode", "kimi", "hermes", "openclaw", "droid", "cursor"] {
+            assert!(!takes(id), "{id}");
+        }
+    }
+
     use super::*;
 
     #[cfg(unix)]

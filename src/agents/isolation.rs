@@ -18,6 +18,14 @@
 //!   directory (empty for the default `~/.claude`), so its credentials are
 //!   read from, and refreshed in, the person's keychain item.
 //!
+//! - Pi, OMP and OpenCode: only their sessions move (Pi's
+//!   `PI_CODING_AGENT_SESSION_DIR`, OMP's `--session-dir`, OpenCode's
+//!   `OPENCODE_DB`), so the login and settings stay the person's as they are.
+//!
+//! Other agents keep the person's home: moving theirs moves their login with
+//! it, and several of them replace a symbolically linked credentials file
+//! with a copy when they refresh it.
+//!
 //! The person's settings, instructions, skills and plugins stay in their own
 //! home. A session decides at creation and keeps its home for life, so its
 //! native conversation can always be resumed; one created to `resume` a
@@ -25,27 +33,62 @@
 
 use std::path::{Path, PathBuf};
 
-use super::Protocol;
+use super::{AgentDef, Protocol};
 use crate::shellenv;
 
-/// The home a new session of `protocol` should get, or None to use the
-/// person's own (other agents, or a login that cannot be shared).
-pub fn home_for(protocol: Protocol) -> Option<PathBuf> {
-    let base = crate::config::home().join("agents");
-    match protocol {
-        Protocol::Codex => codex_shareable(&codex_source()).then(|| base.join("codex")),
-        Protocol::Claude => Some(base.join("claude")),
+/// Where an agent keeps its conversations apart from the person's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Isolation {
+    /// Its whole data home (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`), the login
+    /// shared back.
+    Home,
+    /// Only its sessions; its login and settings stay the person's: Pi
+    /// (`PI_CODING_AGENT_SESSION_DIR`), OMP (`--session-dir`), OpenCode
+    /// (`OPENCODE_DB`, its session database).
+    Sessions,
+}
+
+fn isolation(def: &AgentDef) -> Option<Isolation> {
+    match (def.protocol, def.id.as_str()) {
+        (Protocol::Codex | Protocol::Claude, _) => Some(Isolation::Home),
+        (Protocol::Pi, "pi") | (Protocol::Acp, "omp" | "opencode") => Some(Isolation::Sessions),
         _ => None,
+    }
+}
+
+/// The home a new session of `def` should get, or None to use the person's
+/// own (other agents, or a login that cannot be shared).
+pub fn home_for(def: &AgentDef) -> Option<PathBuf> {
+    let base = crate::config::home().join("agents");
+    match (isolation(def)?, def.protocol) {
+        (Isolation::Home, Protocol::Codex) => codex_shareable(&codex_source()).then(|| base.join("codex")),
+        (Isolation::Home, _) => Some(base.join("claude")),
+        (Isolation::Sessions, _) => Some(base.join(&def.id)),
+    }
+}
+
+/// The command-line arguments that put an agent in `home`.
+pub fn args(def: &AgentDef, home: &Path) -> Vec<String> {
+    match (isolation(def), def.id.as_str()) {
+        (Some(Isolation::Sessions), "omp") => vec!["--session-dir".into(), home.join("sessions").display().to_string()],
+        _ => Vec::new(),
     }
 }
 
 /// The variables that put an agent in `home` (prepared first: the directory,
 /// and Codex's link to the person's login).
-pub fn env(protocol: Protocol, home: &Path) -> Vec<(String, String)> {
+pub fn env(def: &AgentDef, home: &Path) -> Vec<(String, String)> {
     if let Err(e) = std::fs::create_dir_all(home) {
         eprintln!("agent home {}: {e}", home.display());
     }
-    match protocol {
+    if isolation(def) == Some(Isolation::Sessions) {
+        return match def.id.as_str() {
+            "pi" => vec![("PI_CODING_AGENT_SESSION_DIR".into(), home.join("sessions").display().to_string())],
+            "opencode" => vec![("OPENCODE_DB".into(), home.join("opencode.db").display().to_string())],
+            _ => Vec::new(),
+        };
+    }
+    match def.protocol {
         Protocol::Codex => {
             if let Err(e) = link_codex_login(&codex_source(), home) {
                 eprintln!("agent home {}: {e}", home.display());
@@ -125,6 +168,31 @@ fn link_codex_login(source: &Path, home: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    fn agent(id: &str) -> AgentDef {
+        super::super::registry(&crate::config::Config::default()).into_iter().find(|d| d.id == id).unwrap()
+    }
+
+    #[test]
+    fn pi_omp_and_opencode_keep_only_their_sessions_apart() {
+        let home = dir("sessions");
+        assert_eq!(env(&agent("pi"), &home), vec![("PI_CODING_AGENT_SESSION_DIR".to_string(), home.join("sessions").display().to_string())]);
+        assert_eq!(env(&agent("opencode"), &home), vec![("OPENCODE_DB".to_string(), home.join("opencode.db").display().to_string())]);
+        assert!(env(&agent("omp"), &home).is_empty());
+        assert_eq!(args(&agent("omp"), &home), vec!["--session-dir".to_string(), home.join("sessions").display().to_string()]);
+        for id in ["pi", "omp", "opencode"] {
+            assert!(home_for(&agent(id)).unwrap().ends_with(format!("agents/{id}")), "{id}");
+        }
+    }
+
+    #[test]
+    fn agents_whose_login_would_move_keep_the_persons_home() {
+        for id in ["gemini", "kimi", "grok", "hermes", "openclaw", "droid", "cursor"] {
+            assert_eq!(home_for(&agent(id)), None, "{id}");
+            assert!(args(&agent(id), Path::new("/x")).is_empty(), "{id}");
+        }
+    }
+
     use super::*;
 
     fn dir(name: &str) -> PathBuf {
@@ -173,11 +241,11 @@ mod tests {
     #[test]
     fn claude_keeps_the_persons_keychain_item() {
         let home = dir("claude");
-        let vars = env(Protocol::Claude, &home);
+        let vars = env(&agent("claude"), &home);
         assert!(vars.contains(&("CLAUDE_CONFIG_DIR".into(), home.display().to_string())));
         assert!(vars.iter().any(|(k, _)| k == "CLAUDE_SECURESTORAGE_CONFIG_DIR"));
-        assert!(env(Protocol::Acp, &home).is_empty());
-        assert!(home_for(Protocol::Acp).is_none() && home_for(Protocol::Cursor).is_none());
+        assert!(env(&agent("gemini"), &home).is_empty());
+        assert!(home_for(&agent("gemini")).is_none() && home_for(&agent("cursor")).is_none());
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

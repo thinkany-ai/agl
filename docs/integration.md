@@ -40,6 +40,9 @@ Claude Code 和 Codex 把每段对话存在自己的数据目录（`~/.claude`�
 - Codex：`CODEX_HOME=<目录>`，其中 `auth.json` 是指向用户 `auth.json` 的符号链接；Codex 刷新令牌时沿链接写回，两边始终是同一份登录。用户的 Codex 把登录存在钥匙串（`cli_auth_credentials_store` 不是 `file`）、使用自定义 `model_provider`、或者没有 `auth.json` 时无法这样共享，会话仍用用户的目录。
 - Claude Code：`CLAUDE_CONFIG_DIR=<目录>`，`CLAUDE_SECURESTORAGE_CONFIG_DIR` 指向用户自己的配置目录（默认 `~/.claude` 时为空），凭据仍从用户的钥匙串条目读取和刷新。这个变量没有写进 Claude Code 的公开文档（2.1.318 验证）。
 
+- Pi、OMP、OpenCode（0.3.18 起）：只挪会话记录，登录和设置不动。Pi 用 `PI_CODING_AGENT_SESSION_DIR=<目录>/sessions`，OMP 用 `omp acp --session-dir <目录>/sessions`，OpenCode 用 `OPENCODE_DB=<目录>/opencode.db`（它的会话库；`snapshot/`、`tool-output/` 仍在用户的数据目录）。
+- 其他 agent 仍用用户的目录：挪数据目录会把登录一起挪走，而 Kimi、Hermes 等刷新凭据时先写临时文件再改名，会把符号链接替换成副本，两边的单次刷新令牌会互相作废。
+
 用户的设置、`AGENTS.md` / `CLAUDE.md`、skills、插件都留在用户自己的目录里，不带进独立目录。会话在创建时决定目录并一直沿用，所以原生对话总能续接；带 `resume` 创建的会话（续接用户目录里的对话）和本地客户端的会话不受影响。
 
 详见 [desktop-app.md](../skills/agl-integration/references/desktop-app.md#embedding-and-branding-agl-0317)。

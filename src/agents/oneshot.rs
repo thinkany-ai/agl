@@ -64,6 +64,10 @@ impl OneShotDriver {
                 if let Some(id) = &resume {
                     cmd.args(["--session", id]);
                 }
+                // Each run is its own process: the instructions go with every one.
+                if let (Some(text), Some(super::InstructionsVia::AppendSystemPromptFlag)) = (&self.spec.instructions, self.spec.def.appends_instructions()) {
+                    cmd.arg("--append-system-prompt").arg(text);
+                }
                 if let Some(m) = &self.spec.model {
                     cmd.args(["--model", m]);
                 }

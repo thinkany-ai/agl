@@ -265,7 +265,7 @@ local only. A hub never sees `instructions` back in session metadata.
 | field | effect | agents |
 |---|---|---|
 | `extra_args: string[]` | Appended to the agent's launch arguments, after agl's own. | every agent (`extra_args` feature): claude after its flags; codex after `app-server …`; ACP after the agent's own args; cursor before the `--` that precedes the prompt; pi at the end |
-| `instructions: string` | Extra system / developer instructions, on top of the agent's own (not replacing them). | claude (`--append-system-prompt`), codex (`developerInstructions`, on `thread/start` and `thread/resume`): the `instructions` feature. Other agents have no native way and reject it: `` agent `<id>` does not support `instructions` ``. Blank text is ignored. |
+| `instructions: string` | Extra system / developer instructions, on top of the agent's own (not replacing them). | claude (`--append-system-prompt`), codex (`developerInstructions`, on `thread/start` and `thread/resume`); from 0.3.18 also pi and omp (`--append-system-prompt`, on every launch) and grok (ACP `_meta.rules` on `session/new`, `session/load` and `session/resume`): the `instructions` feature. Other agents have no native way and reject it: `` agent `<id>` does not support `instructions` ``. Blank text is ignored. |
 | `ephemeral: true` | The agent keeps no conversation of its own on disk. | claude (`--no-session-persistence`), codex (ephemeral thread, no rollout): the `ephemeral` feature. Others reject it: `` agent `<id>` does not support `ephemeral` ``. |
 
 Limits: at most 64 `extra_args` of at most 4096 bytes each, `instructions`

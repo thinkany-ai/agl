@@ -57,7 +57,14 @@ fn modes_for(access: &str) -> &'static [&'static str] {
 impl AcpDriver {
     pub async fn spawn(bin: &Path, spec: &SpawnSpec, tx: DriverTx) -> Result<Self> {
         let mut cmd = base_command(bin, spec);
-        cmd.args(&spec.def.args).args(&spec.extra_args);
+        cmd.args(&spec.def.args);
+        if let Some(home) = &spec.agent_home {
+            cmd.args(super::isolation::args(&spec.def, home));
+        }
+        if let (Some(text), Some(super::InstructionsVia::AppendSystemPromptFlag)) = (&spec.instructions, spec.def.appends_instructions()) {
+            cmd.arg("--append-system-prompt").arg(text);
+        }
+        cmd.args(&spec.extra_args);
         let mut child = cmd.spawn().with_context(|| format!("spawn {}", bin.display()))?;
         if let Some(pid) = child.id() {
             track(pid);
@@ -159,8 +166,20 @@ impl AcpDriver {
         let cwd = spec.cwd.display().to_string();
 
         let mut opened: Option<Value> = None;
+        // Instructions an agent takes on the session (Grok's `_meta.rules`),
+        // given again on a load or resume: they belong to this process.
+        let meta = match (&spec.instructions, spec.def.appends_instructions()) {
+            (Some(text), Some(super::InstructionsVia::AcpMetaRules)) => Some(json!({"rules": text})),
+            _ => None,
+        };
+        let with_meta = |mut v: Value| {
+            if let Some(m) = &meta {
+                v["_meta"] = m.clone();
+            }
+            v
+        };
         if let Some(id) = &spec.resume {
-            let params = json!({"sessionId": id, "cwd": cwd, "mcpServers": []});
+            let params = with_meta(json!({"sessionId": id, "cwd": cwd, "mcpServers": []}));
             // resume does not replay history; load does (and we skip it).
             let res = if caps["sessionCapabilities"].get("resume").is_some() {
                 self.peer.request("session/resume", params, ACK).await
@@ -185,7 +204,7 @@ impl AcpDriver {
         let opened = match opened {
             Some(r) => r,
             None => {
-                let r = self.peer.request("session/new", json!({"cwd": cwd, "mcpServers": []}), ACK).await?;
+                let r = self.peer.request("session/new", with_meta(json!({"cwd": cwd, "mcpServers": []})), ACK).await?;
                 let Some(sid) = r["sessionId"].as_str() else { bail!("{} returned no sessionId", self.name) };
                 self.session_id = sid.to_string();
                 r
