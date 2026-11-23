@@ -113,6 +113,14 @@ pub fn level(cfg: &Config, origin: &Origin, approvals: bool) -> Level {
     if !crate::computer::supported() {
         return Level::Deny("computer use needs macOS".into());
     }
+    if let Origin::Hub { url, .. } = origin {
+        if !cfg.computer_use_on(url) {
+            return Level::Deny(format!(
+                "computer use is off for this link; the person can turn it on on that computer with `{} computer-use on {url}`",
+                crate::brand::get().cli_name
+            ));
+        }
+    }
     link_level(cfg, origin, approvals, "computer use")
 }
 
@@ -559,6 +567,27 @@ async fn run(runtime: &super::Runtime, cfg: &Config, origin: &Origin, name: &str
 mod tests {
     use super::super::approvals::{self, Approvals};
     use super::*;
+
+    #[test]
+    fn computer_use_is_off_for_a_link_until_the_person_turns_it_on() {
+        let url = "https://hub.example/agl";
+        let mut cfg = Config::default();
+        let mut link = crate::config::HubLink::new(url);
+        link.access = "full".into();
+        cfg.hubs.push(link);
+        let origin = Origin::Hub { url: url.into(), share_local: false };
+        assert!(matches!(level(&cfg, &origin, false), Level::Deny(_)));
+        assert!(list(&cfg, &origin, false).is_empty());
+        cfg.hubs[0].computer_use = Some(true);
+        if crate::computer::supported() {
+            assert!(matches!(level(&cfg, &origin, false), Level::Allow));
+            assert!(!list(&cfg, &origin, false).is_empty());
+        }
+        // A local client is the person.
+        if crate::computer::supported() {
+            assert!(matches!(level(&Config::default(), &Origin::Local, false), Level::Allow));
+        }
+    }
 
     #[test]
     fn a_missing_permission_restarts_the_helper() {

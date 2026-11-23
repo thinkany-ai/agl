@@ -208,6 +208,16 @@ Codex's Computer Use does, with no coding agent installed: it reads a
 window's accessibility tree and screenshot, then presses, types and scrolls
 **in the background**, without taking over the person's pointer or focus.
 
+**Off per link until the person turns it on (0.3.17).** A hub link lists and
+may call the `computer_*` tools only when computer use is on for it:
+`agl computer-use on [hub]`, or `agl connect … --computer-use` (the link's
+`computer_use` in the config; `agl computer-use off` turns it off). A hub
+cannot turn it on; while it is off, `hello` `tools` and `tools.list` leave
+the tools out and a call answers `computer use is off for this link`. A
+product embedding agl may default its own links to on
+(`Brand::computer_use_default`). Local clients are not affected. Then the
+access rule below applies.
+
 | Tool | Arguments (besides `app`) | Does |
 |---|---|---|
 | `computer_list_apps` | – (no `app`) | `{apps: [{bundle_id, name, pid, windows: [{id, title, focused}], blocked}]}` |

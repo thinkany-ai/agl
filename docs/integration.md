@@ -24,10 +24,11 @@
 | `computer_helper` | 自己签名的 computer-use 辅助程序；macOS 的辅助功能、屏幕录制授权记在它的 App 名下，升级后不失效 |
 | `blocked_apps` | computer use 始终不操作的 bundle id（例如产品自己的 App） |
 | `product` | 在机器 `hello` 里报告的 `{name, version}` |
+| `computer_use_default` | 链接没有设置 `computer_use` 时，computer use 是否打开；agl 本身为 `false`（用户用 `agl computer-use on` 打开） |
 
 - 自己的命令行：`agl::brand::set(..)` 后调用 `agl::app::hold_from_args()` 与 `agl::cli::run()`。
 - App 内常驻：`agl::daemon::spawn_embedded(cfg, opts)` 在调用方的 tokio 运行时里启动 daemon，返回端口与 token；退出前看 `busy()`，再 `shutdown().await`。同一个状态目录同时只能有一个 daemon。
-- 链接管理：`agl::link::connect(url, ConnectOptions { … })`、`agl::link::disconnect(url)`，效果与 `connect` / `disconnect` 命令相同。
+- 链接管理：`agl::link::connect(url, ConnectOptions { … })`、`agl::link::disconnect(url)`、`agl::link::set_computer_use(url, on)`，效果与 `connect` / `disconnect` / `computer-use` 命令相同。
 - 辅助程序的 `main` 只需要 `std::process::exit(agl::computer::helper_main())`；agl 以 `<helper> __computer --responsible` 启动它，它会先让自己成为“负责进程”再开始服务。
 
 详见 [desktop-app.md](../skills/agl-integration/references/desktop-app.md#embedding-and-branding-agl-0317)。

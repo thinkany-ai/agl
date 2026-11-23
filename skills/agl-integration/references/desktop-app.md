@@ -158,6 +158,7 @@ agl::brand::set(Brand {
     computer_helper: Some(helper_path),      // see below
     blocked_apps: vec!["com.acme.desktop".into()], // computer use never operates these
     product: Some(Product { name: "acme-desktop".into(), version: env!("CARGO_PKG_VERSION").into() }),
+    computer_use_default: true,              // links get computer use unless the person turned it off
 })?;
 ```
 

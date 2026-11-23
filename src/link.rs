@@ -37,6 +37,8 @@ pub struct ConnectOptions {
     pub transport: Option<String>,
     /// The product behind this hub, for macOS privacy prompts (`""` clears).
     pub app_name: Option<String>,
+    /// Computer use (the screen, macOS) for this hub; None leaves it as it is.
+    pub computer_use: Option<bool>,
     /// Wait this long for the link to come up (or fail) on a running daemon.
     pub wait: Option<Duration>,
 }
@@ -83,6 +85,9 @@ pub async fn connect(hub_url: &str, opts: ConnectOptions) -> Result<()> {
     if let Some(n) = opts.app_name {
         entry.app_name = crate::app::validate(&n).context("app_name")?;
     }
+    if opts.computer_use.is_some() {
+        entry.computer_use = opts.computer_use;
+    }
     cfg.hubs.retain(|h| h.url != url);
     cfg.hubs.push(entry);
     cfg.save()?;
@@ -117,6 +122,20 @@ pub async fn connect(hub_url: &str, opts: ConnectOptions) -> Result<()> {
 
 /// Unlinks this machine from a hub, as the `disconnect` command does. False
 /// when it was not linked. A daemon running in this home drops the link.
+/// Turns computer use on or off for a linked hub; a running daemon relinks
+/// it, so the hub's `hello` lists the tools as they now are.
+pub async fn set_computer_use(hub_url: &str, on: bool) -> Result<()> {
+    let url = config::normalize_url(hub_url);
+    let mut cfg = Config::load()?;
+    let Some(entry) = cfg.hubs.iter_mut().find(|h| h.url == url) else { bail!("not linked to {url}") };
+    entry.computer_use = Some(on);
+    cfg.save()?;
+    if let Ok(c) = crate::client::Client::connect_local().await {
+        c.call("hub.reload", serde_json::json!({})).await?;
+    }
+    Ok(())
+}
+
 pub async fn disconnect(hub_url: &str) -> Result<bool> {
     let url = config::normalize_url(hub_url);
     let mut cfg = Config::load()?;
@@ -308,7 +327,7 @@ async fn connect_once(d: &Arc<Daemon>, link: &HubLink, kind: &str, secret: &str)
         let Ok(WireMsg::Paired { token }) = serde_json::from_str::<WireMsg>(&text) else { bail!("unexpected pairing reply") };
         return store_token(d, hub, token, None);
     }
-    sink.send(Message::Text(WireMsg::Hello { machine: machine_info(&cfg).await }.to_json().into())).await?;
+    sink.send(Message::Text(WireMsg::Hello { machine: machine_info(&cfg, &crate::session::Origin::Hub { url: hub.to_string(), share_local: false }).await }.to_json().into())).await?;
     set_status(d, hub, "connected");
     eprintln!("hub link {hub}: connected");
 

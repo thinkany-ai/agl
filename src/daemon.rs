@@ -429,7 +429,10 @@ fn started_at() -> u64 {
     *STARTED_AT.get_or_init(crate::protocol::now_ms)
 }
 
-pub async fn machine_info(cfg: &Config) -> MachineInfo {
+/// What this machine tells `origin` about itself: its `tools` are the ones
+/// that link may use (computer use only where it is on).
+pub async fn machine_info(cfg: &Config, origin: &Origin) -> MachineInfo {
+    let tools = tools_for(cfg, origin);
     MachineInfo {
         home: dirs::home_dir().map(|h| h.display().to_string()).unwrap_or_default(),
         started_at: started_at(),
@@ -440,9 +443,20 @@ pub async fn machine_info(cfg: &Config) -> MachineInfo {
         version: VERSION.into(),
         protocol: PROTOCOL,
         agents: agents::detect(cfg, false).await,
-        tools: crate::machine::tool_names(),
+        tools,
         product: crate::brand::get().product.clone(),
     }
+}
+
+/// The built-in tools `origin` may use: computer use only where it is on.
+fn tools_for(cfg: &Config, origin: &Origin) -> Vec<String> {
+    let mut tools = crate::machine::tool_names();
+    if let Origin::Hub { url, .. } = origin {
+        if !cfg.computer_use_on(url) {
+            tools.retain(|t| !crate::machine::computer::is_tool(t));
+        }
+    }
+    tools
 }
 
 /// A session as the caller may see it: a hub never sees the launch settings
@@ -469,7 +483,7 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
     Ok(match method {
         // `started_at` changes when the daemon restarts (which ends every turn).
         "ping" => json!({"pong": true, "version": VERSION, "protocol": PROTOCOL, "started_at": started_at()}),
-        "machine.info" => serde_json::to_value(machine_info(&mgr.cfg()).await)?,
+        "machine.info" => serde_json::to_value(machine_info(&mgr.cfg(), origin).await)?,
         "agents.list" => serde_json::to_value(agents::detect(&mgr.cfg(), params["check_updates"].as_bool().unwrap_or(false)).await)?,
         "agents.models" => agents::list_models(&mgr.cfg(), str_param(&params, "agent")?).await?,
         "daemon.status" => {
@@ -636,5 +650,24 @@ fn launch_setting_in_effect(v: &Value) -> bool {
         Value::Array(a) => !a.is_empty(),
         Value::String(t) => !t.trim().is_empty(),
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hello_lists_computer_use_only_for_links_that_have_it_on() {
+        let url = "https://hub.example/agl";
+        let mut cfg = Config::default();
+        cfg.hubs.push(config::HubLink::new(url));
+        let origin = Origin::Hub { url: url.into(), share_local: false };
+        let off = tools_for(&cfg, &origin);
+        assert!(off.contains(&"read".to_string()));
+        assert!(!off.iter().any(|t| t.starts_with("computer_")));
+        cfg.hubs[0].computer_use = Some(true);
+        let on = tools_for(&cfg, &origin);
+        assert_eq!(on.iter().any(|t| t.starts_with("computer_")), crate::computer::supported());
     }
 }

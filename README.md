@@ -21,7 +21,7 @@ The design draws on [botiverse/oar](https://github.com/botiverse/oar) and on the
 
 | | |
 |---|---|
-| **Built-in local tools** | Discoverable tools for cloud agent loops, independent of installed agents. Exact text edits, paged reads, cancellable commands, incremental output and execution-ID deduplication. On macOS, `computer_*` tools operate apps in the background through accessibility, with screenshots and per-app approval. |
+| **Built-in local tools** | Discoverable tools for cloud agent loops, independent of installed agents. Exact text edits, paged reads, cancellable commands, incremental output and execution-ID deduplication. On macOS, `computer_*` tools operate apps in the background through accessibility, with screenshots and per-app approval, once the person turns it on for a link (`agl computer-use on`). |
 | **One protocol, 11+ agents** | Each agent is driven through its best first-party interface. Any ACP-speaking CLI can be added through config. |
 | **Warm sessions, reused context** | The agent process stays alive between turns. After it is suspended, or after a daemon restart, native resume continues the same conversation. Measured: Claude's time to first token drops from about 6s to about 1s per turn. |
 | **Reusable sessions** | Sessions can be reused by name (`-s name`). The CLI, desktop apps and the web share the same sessions, so one can pick up where another left off. History is persisted, with a resume cursor. |

@@ -180,6 +180,16 @@ enum Cmd {
         /// name it instead of agl (`""` clears it)
         #[arg(long)]
         app_name: Option<String>,
+        /// Let this hub see and operate the screen (computer use, macOS)
+        #[arg(long)]
+        computer_use: bool,
+    },
+    /// Turn computer use (seeing and operating the screen, macOS) on or off
+    /// for a hub (the only one, or the named one)
+    ComputerUse {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+        url: Option<String>,
     },
     /// Unlink this machine from a hub (the only one, or the named one)
     Disconnect {
@@ -484,7 +494,7 @@ async fn real_main() -> Result<()> {
             println!("suspended {} · removed {}", r["suspended"].as_array().map_or(0, |a| a.len()), r["removed"].as_array().map_or(0, |a| a.len()));
             Ok(())
         }
-        Cmd::Connect { url, code, token, name, access, private, transport, app_name } => {
+        Cmd::Connect { url, code, token, name, access, private, transport, app_name, computer_use } => {
             if code.is_none() && token.is_none() {
                 bail!("pass --code <pairing code> or --token <token>");
             }
@@ -500,7 +510,7 @@ async fn real_main() -> Result<()> {
             let url = config::normalize_url(&url);
             link::connect(
                 &url,
-                link::ConnectOptions { code, token, access, private, transport, app_name, wait: Some(Duration::from_secs(15)) },
+                link::ConnectOptions { code, token, access, private, transport, app_name, computer_use: computer_use.then_some(true), wait: Some(Duration::from_secs(15)) },
             )
             .await?;
             let cfg = Config::load()?;
@@ -508,6 +518,23 @@ async fn real_main() -> Result<()> {
             println!("✓ connected to {url}");
             println!("  machine id: {}", cfg.machine_id);
             println!("  sessions it creates default to `{}` access; it {} local sessions", entry.access, if entry.share_local { "can see" } else { "cannot see" });
+            if crate::computer::supported() {
+                println!("  computer use (the screen) is {}", if cfg.computer_use_on(&url) { "on" } else { "off" });
+            }
+            Ok(())
+        }
+        Cmd::ComputerUse { state, url } => {
+            let url = match url {
+                Some(u) => config::normalize_url(&u),
+                None if cfg.hubs.len() == 1 => cfg.hubs[0].url.clone(),
+                None if cfg.hubs.is_empty() => bail!("not linked to any hub"),
+                None => bail!("linked to {} hubs; name one", cfg.hubs.len()),
+            };
+            link::set_computer_use(&url, state == "on").await?;
+            println!("computer use is {state} for {url}");
+            if state == "on" && !crate::computer::supported() {
+                println!("note: computer use works on macOS only");
+            }
             Ok(())
         }
         Cmd::Disconnect { url, all } => {

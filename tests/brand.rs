@@ -25,6 +25,7 @@ fn home() -> &'static PathBuf {
             computer_helper: None,
             blocked_apps: vec!["com.example.desktop".into()],
             product: Some(Product { name: "example-desktop".into(), version: "9.1.0".into() }),
+            computer_use_default: true,
         })
         .unwrap();
         dir
@@ -47,6 +48,18 @@ fn the_brand_names_the_command_line() {
     assert!(!help.contains("Usage: agl"), "{help}");
     // Set once.
     assert!(brand::set(Brand::default()).is_err());
+}
+
+#[test]
+fn computer_use_follows_the_brand_unless_the_link_says() {
+    home();
+    let mut cfg = agl::config::Config::default();
+    let mut link = agl::config::HubLink::new("http://127.0.0.1:9/hub");
+    cfg.hubs.push(link.clone());
+    assert!(cfg.computer_use_on("http://127.0.0.1:9/hub"));
+    link.computer_use = Some(false);
+    cfg.hubs = vec![link];
+    assert!(!cfg.computer_use_on("http://127.0.0.1:9/hub"));
 }
 
 #[test]

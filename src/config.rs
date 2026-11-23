@@ -117,6 +117,12 @@ pub struct HubLink {
     /// name it instead of agl, unless `session.create` names another.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_name: Option<String>,
+    /// Computer use (macOS) for this hub: its `computer_*` tools. Only the
+    /// person sets it, on this computer (`agl computer-use on|off`, or
+    /// `agl connect --computer-use`); unset: the build's default (off for
+    /// agl).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_use: Option<bool>,
 }
 
 pub const TRANSPORTS: [&str; 2] = ["ws", "http"];
@@ -135,7 +141,7 @@ fn default_true() -> bool {
 
 impl HubLink {
     pub fn new(url: &str) -> HubLink {
-        HubLink { url: normalize_url(url), token: None, pair_code: None, access: default_remote_access(), share_local: true, transport: default_transport(), max_body: None, app_name: None }
+        HubLink { url: normalize_url(url), token: None, pair_code: None, access: default_remote_access(), share_local: true, transport: default_transport(), max_body: None, app_name: None, computer_use: None }
     }
 }
 
@@ -226,6 +232,11 @@ impl Config {
     pub fn hub(&self, url: &str) -> Option<&HubLink> {
         let url = normalize_url(url);
         self.hubs.iter().find(|h| h.url == url)
+    }
+
+    /// Whether computer use is on for this hub (see `HubLink::computer_use`).
+    pub fn computer_use_on(&self, url: &str) -> bool {
+        self.hub(url).and_then(|h| h.computer_use).unwrap_or(crate::brand::get().computer_use_default)
     }
 
     pub fn load() -> Result<Config> {

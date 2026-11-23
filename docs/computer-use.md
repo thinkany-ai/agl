@@ -179,7 +179,10 @@ agl daemon ──stdio JSON──> $AGL_HOME/apps/<app_name>.app/…/agl __hold 
 
 ## 6. 权限与审批
 
-`computer_*` 的能力相当于 `exec`，可以间接做任何事，所以默认比文件工具更严格：
+`computer_*` 的能力相当于 `exec`，可以间接做任何事，所以默认比文件工具更严格。
+
+**先要用户打开（0.3.17 起）**：每条 hub 链接默认关闭 computer use，`hello` 的 `tools` 和 `tools.list` 都不列出这些工具，调用返回 `computer use is off for this link`。只有用户在本机打开后，下表才生效：`agl computer-use on [hub]`，或者在 `agl connect` 时加 `--computer-use`（关闭用 `agl computer-use off [hub]`，配置里是该链接的 `computer_use`）。hub 无法替用户打开。嵌入 agl 的产品可以用 `Brand::computer_use_default` 让自己的链接默认打开（它自己的 App 带着 computer-use 辅助程序，用户安装它就是在选择这项能力）；本机客户端不受此限制。
+
 
 | 链路 access | 不传 `approvals` | 传 `approvals: true` |
 |---|---|---|
