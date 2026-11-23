@@ -25,10 +25,16 @@ pub struct Brand {
     pub display_name: String,
     /// The default state directory; `AGL_HOME` still wins. None: `~/.agl`.
     pub home: Option<PathBuf>,
-    /// The launchd label of the autostart service (`cc.agl.daemon`).
+    /// The launchd label of the autostart service (`run.agl.daemon`).
     pub service_label: String,
     /// The systemd user unit of the autostart service (`agl.service`).
     pub systemd_unit: String,
+    /// An autostart service the product registers itself instead of the
+    /// launchd agent or systemd unit agl writes — on macOS, one its app
+    /// bundle carries and registers with `SMAppService`, so System Settings
+    /// shows the app rather than the signing team. Its launchd job keeps
+    /// `service_label`. None: agl's own.
+    pub service: Option<ServiceBackend>,
     /// Where updates come from, laid out like GitHub releases
     /// (`<base>/latest`, `<base>/download/v<version>/<cli_name>-<os>-<arch>`).
     /// `AGL_RELEASES_BASE` overrides it. None: this build is updated some
@@ -42,6 +48,13 @@ pub struct Brand {
     /// itself, so macOS keeps Accessibility and Screen Recording on its
     /// bundle. With a helper, one helper serves every hub (no `app_name`).
     pub computer_helper: Option<PathBuf>,
+    /// The product's own signed app executable that agents and commands run
+    /// under whatever `app_name` a hub asks for, so macOS names them after
+    /// that app (its icon, its signing team, one name per build) rather than
+    /// after a launcher bundle agl builds per name (`run.agl.app.*`, ad hoc,
+    /// no icon). Its `main` must call [`crate::app::hold_from_args`] first
+    /// thing. None: agl's launchers.
+    pub app_launcher: Option<PathBuf>,
     /// Bundle ids computer use never operates, on top of the built-in list
     /// and `computer.blocked_apps` (a host adds its own apps here).
     pub blocked_apps: Vec<String>,
@@ -60,6 +73,23 @@ pub struct Brand {
     pub hub_instructions_default: bool,
 }
 
+/// See [`Brand::service`]. `install` also restarts a daemon the service
+/// already runs, as agl's own does (a reinstall or an upgrade).
+#[derive(Clone, Copy, Debug)]
+pub struct ServiceBackend {
+    pub install: fn() -> Result<()>,
+    pub uninstall: fn() -> Result<()>,
+    pub is_installed: fn() -> bool,
+}
+
+impl PartialEq for ServiceBackend {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::fn_addr_eq(self.install, other.install)
+            && std::ptr::fn_addr_eq(self.uninstall, other.uninstall)
+            && std::ptr::fn_addr_eq(self.is_installed, other.is_installed)
+    }
+}
+
 /// A product name and version, as hubs see it (`hello.product`).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Product {
@@ -73,11 +103,13 @@ impl Default for Brand {
             cli_name: "agl".into(),
             display_name: "agl".into(),
             home: None,
-            service_label: "cc.agl.daemon".into(),
+            service_label: "run.agl.daemon".into(),
             systemd_unit: "agl.service".into(),
+            service: None,
             releases: Some(AGL_RELEASES.into()),
             allowed_hubs: None,
             computer_helper: None,
+            app_launcher: None,
             blocked_apps: Vec::new(),
             product: None,
             computer_use_default: false,
@@ -146,7 +178,7 @@ mod tests {
     fn default_is_agl() {
         let b = Brand::default();
         assert_eq!(b.cli_name, "agl");
-        assert_eq!(b.service_label, "cc.agl.daemon");
+        assert_eq!(b.service_label, "run.agl.daemon");
         assert_eq!(b.systemd_unit, "agl.service");
         assert_eq!(b.releases.as_deref(), Some(AGL_RELEASES));
         assert!(b.home.is_none() && b.allowed_hubs.is_none() && b.computer_helper.is_none() && b.product.is_none());

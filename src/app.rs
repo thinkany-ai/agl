@@ -23,7 +23,7 @@ pub const HOLD_ARG: &str = "__hold";
 const HELD_ARG: &str = "__held";
 /// Bump when the launcher's command line or behavior changes: launchers are
 /// rebuilt then (and their privacy grants asked for again).
-const HOLDER_REV: &str = "1";
+const HOLDER_REV: &str = "2";
 pub const MAX_NAME_CHARS: usize = 48;
 
 /// A usable `app_name`: trimmed, at most 48 characters, no control
@@ -51,6 +51,9 @@ pub fn launcher(name: &str) -> Option<PathBuf> {
     // `__hold` (it called `hold_from_args` first thing) can serve.
     if !cfg!(target_os = "macos") || !CAN_HOLD.load(std::sync::atomic::Ordering::SeqCst) {
         return None;
+    }
+    if let Some(own) = &crate::brand::get().app_launcher {
+        return Some(own.clone());
     }
     match ensure_bundle(&crate::config::home().join("apps"), name) {
         Ok(p) => Some(p),
@@ -81,13 +84,13 @@ fn bundle_id(name: &str) -> String {
         .collect::<Vec<_>>()
         .join("-");
     if !slug.is_empty() && name.is_ascii() {
-        return format!("cc.agl.app.{slug}");
+        return format!("run.agl.app.{slug}");
     }
     let hash: String = Sha256::digest(name.as_bytes()).iter().take(6).map(|b| format!("{b:02x}")).collect();
     if slug.is_empty() {
-        format!("cc.agl.app.x{hash}")
+        format!("run.agl.app.x{hash}")
     } else {
-        format!("cc.agl.app.{slug}-{hash}")
+        format!("run.agl.app.{slug}-{hash}")
     }
 }
 
@@ -324,10 +327,10 @@ mod tests {
         assert!(validate(".hidden").is_err());
         assert!(validate("x\ny").is_err());
         assert!(validate(&"x".repeat(49)).is_err());
-        assert_eq!(bundle_id("Sumus"), "cc.agl.app.sumus");
-        assert_eq!(bundle_id("Dou Chat!"), "cc.agl.app.dou-chat");
-        assert!(bundle_id("豆聊").starts_with("cc.agl.app.x"));
+        assert_eq!(bundle_id("Sumus"), "run.agl.app.sumus");
+        assert_eq!(bundle_id("Dou Chat!"), "run.agl.app.dou-chat");
+        assert!(bundle_id("豆聊").starts_with("run.agl.app.x"));
         assert_ne!(bundle_id("豆聊"), bundle_id("豆包"));
-        assert!(info_plist("A&B", "cc.agl.app.a-b", "A&B").contains("<string>A&amp;B</string>"));
+        assert!(info_plist("A&B", "run.agl.app.a-b", "A&B").contains("<string>A&amp;B</string>"));
     }
 }

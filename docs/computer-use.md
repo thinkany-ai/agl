@@ -15,7 +15,7 @@
 | 快捷键直接发给进程 | 后台时先在 App 菜单栏里找快捷键相同、且可用的菜单项并按下；`cmd+a` 在文本控件上直接设置选区；都不行再发键盘事件 |
 | 浮层 + 全局停止快捷键 | **未做**。停止靠 hub 调用 `computer.stop` / `computer.reset`（页面上的停止按钮） |
 | 每个 App 可以并行 | 每个产品一个辅助进程，请求串行 |
-| 默认禁止调用方产品自己的 App | 只禁止 agl 生成的 launcher（`cc.agl.app.*`）；产品的桌面 App 可通过 `computer.blocked_apps` 加入 |
+| 默认禁止调用方产品自己的 App | 只禁止 agl 生成的 launcher（`run.agl.app.*`）；产品的桌面 App 可通过 `computer.blocked_apps` 加入 |
 
 本机实测（macOS 26）：Surge、TextEdit 上读树、截图、按元素和按坐标点击、插入文本、键盘输入、`cmd+a`、设值、过期检测都在后台完成，前台 App 始终没有变化。
 

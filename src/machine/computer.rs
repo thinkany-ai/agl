@@ -61,7 +61,8 @@ const BLOCKED: &[&str] = &[
     // Where privacy grants are changed.
     "com.apple.systempreferences",
     "com.apple.SecurityAgent",
-    // agl's own product launchers.
+    // agl's own product launchers (`cc.agl.app.*` in earlier builds).
+    "run.agl.app.*",
     "cc.agl.app.*",
 ];
 
@@ -602,6 +603,7 @@ mod tests {
         let mut cfg = Config::default();
         assert!(blocked(&cfg, "com.apple.Terminal"));
         assert!(blocked(&cfg, "com.apple.terminal"));
+        assert!(blocked(&cfg, "run.agl.app.sumus"));
         assert!(blocked(&cfg, "cc.agl.app.sumus"));
         assert!(!blocked(&cfg, "com.apple.Notes"));
         cfg.computer.allowed_blocked_apps = vec!["com.apple.Terminal".into()];

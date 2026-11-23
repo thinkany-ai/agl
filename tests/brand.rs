@@ -23,6 +23,8 @@ fn home() -> &'static PathBuf {
             releases: None,
             allowed_hubs: Some(vec!["http://127.0.0.1:9".into()]),
             computer_helper: None,
+            app_launcher: None,
+            service: None,
             blocked_apps: vec!["com.example.desktop".into()],
             product: Some(Product { name: "example-desktop".into(), version: "9.1.0".into() }),
             computer_use_default: true,

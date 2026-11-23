@@ -231,7 +231,7 @@ name or `agl` means none. A hub filling `__APP_NAME__` puts it inside double
 quotes in a shell script, so it must not contain `"`, `$`, `` ` `` or `\`.
 
 How it works: agl builds `$AGL_HOME/apps/<app_name>.app`, a bundle named
-after the product (ad-hoc signed, `cc.agl.app.<slug>`), whose executable is a
+after the product (ad-hoc signed, `run.agl.app.<slug>`), whose executable is a
 copy of agl acting as a launcher. The agent is started through it; the
 launcher disclaims responsibility (as Terminal does for its shells), so macOS
 attributes the agent and everything it starts to that bundle. The launcher is

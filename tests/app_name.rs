@@ -74,7 +74,7 @@ async fn exec_for_an_app_is_attributed_to_its_bundle() {
     let bundle = home.join("apps/Sumus Test.app");
     assert_eq!(who.canonicalize().unwrap(), bundle.join("Contents/MacOS/Sumus Test").canonicalize().unwrap());
     let plist = std::fs::read_to_string(bundle.join("Contents/Info.plist")).unwrap();
-    assert!(plist.contains("<string>Sumus Test</string>") && plist.contains("cc.agl.app.sumus-test"));
+    assert!(plist.contains("<string>Sumus Test</string>") && plist.contains("run.agl.app.sumus-test"));
 
     // The launcher is reused: same file, so macOS keeps the grants.
     let before = std::fs::metadata(bundle.join("Contents/MacOS/Sumus Test")).unwrap().modified().unwrap();

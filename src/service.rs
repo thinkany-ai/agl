@@ -1,7 +1,8 @@
 //! Autostart: a launchd agent on macOS, a systemd user unit on Linux. The
 //! unit captures the current PATH so the daemon finds `claude` / `codex`.
-//! Its label and unit name come from the brand (`cc.agl.daemon`,
-//! `agl.service` for agl itself).
+//! Its label and unit name come from the brand (`run.agl.daemon`,
+//! `agl.service` for agl itself; agl's launchd label was `cc.agl.daemon`
+//! before, and installing replaces that agent).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -18,6 +19,27 @@ fn unit() -> &'static str {
     &brand::get().systemd_unit
 }
 
+/// agl's launchd label before `run.agl.daemon`.
+const LEGACY_LABEL: &str = "cc.agl.daemon";
+
+/// agl's own agent under its earlier label, on macOS, for agl itself only
+/// (a brand always chose its own label).
+fn legacy_plist() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") || label() != brand::Brand::default().service_label {
+        return None;
+    }
+    let path = dirs::home_dir()?.join("Library/LaunchAgents").join(format!("{LEGACY_LABEL}.plist"));
+    path.exists().then_some(path)
+}
+
+/// Stops and deletes the agent under the earlier label.
+fn remove_legacy() {
+    if let Some(path) = legacy_plist() {
+        let _ = Command::new("launchctl").args(["bootout", &format!("gui/{}", uid()), &path.display().to_string()]).output();
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 fn unit_path() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     if cfg!(target_os = "macos") {
@@ -30,7 +52,16 @@ fn unit_path() -> Option<PathBuf> {
 }
 
 pub fn is_installed() -> bool {
-    unit_path().map(|p| p.exists()).unwrap_or(false)
+    if let Some(s) = brand::get().service {
+        return (s.is_installed)();
+    }
+    unit_installed()
+}
+
+/// Whether agl's own launchd agent or systemd unit is there, whatever the
+/// brand's [`brand::ServiceBackend`] — which may fall back to it.
+pub fn unit_installed() -> bool {
+    unit_path().map(|p| p.exists()).unwrap_or(false) || legacy_plist().is_some()
 }
 
 /// Whether this process is the autostart service's own daemon, which the
@@ -38,7 +69,18 @@ pub fn is_installed() -> bool {
 /// a daemon started with `agl start` (or by an installer's fallback) runs
 /// beside an idle unit, and nothing would bring it back.
 pub fn runs_this_process() -> bool {
-    is_installed() && started_by_service(label(), unit(), std::env::var("XPC_SERVICE_NAME").ok().as_deref(), &cgroup())
+    is_installed() && started_by_service(running_label(), unit(), std::env::var("XPC_SERVICE_NAME").ok().as_deref(), &cgroup())
+}
+
+/// The launchd label of the job this daemon runs under: the earlier one
+/// while launchd still runs agl's agent from before (a `daemon.update`
+/// keeps it; the next `service install` replaces it).
+fn running_label() -> &'static str {
+    if std::env::var("XPC_SERVICE_NAME").ok().as_deref() == Some(LEGACY_LABEL) && legacy_plist().is_some() {
+        LEGACY_LABEL
+    } else {
+        label()
+    }
 }
 
 fn cgroup() -> String {
@@ -54,7 +96,7 @@ fn cgroup() -> String {
 /// restarts it promptly by itself (systemd).
 pub fn kickstart_command() -> Option<String> {
     if cfg!(target_os = "macos") {
-        Some(format!("launchctl kickstart gui/{}/{}", uid(), label()))
+        Some(format!("launchctl kickstart gui/{}/{}", uid(), running_label()))
     } else {
         None
     }
@@ -77,6 +119,15 @@ fn xml_escape(s: &str) -> String {
 }
 
 pub fn install() -> Result<()> {
+    if let Some(s) = brand::get().service {
+        return (s.install)();
+    }
+    install_unit()
+}
+
+/// Writes and starts agl's own launchd agent or systemd unit, whatever the
+/// brand's [`brand::ServiceBackend`].
+pub fn install_unit() -> Result<()> {
     let b = brand::get();
     let Some(path) = unit_path() else { bail!("autostart is only supported on macOS and Linux; run `{} start` instead", b.cli_name) };
     let exe = std::env::current_exe()?.canonicalize()?;
@@ -107,6 +158,7 @@ pub fn install() -> Result<()> {
             log = xml_escape(&log.display().to_string()),
         );
         std::fs::write(&path, plist)?;
+        remove_legacy();
         let domain = format!("gui/{}", uid());
         let _ = Command::new("launchctl").args(["bootout", &domain, &path.display().to_string()]).output();
         let out = Command::new("launchctl")
@@ -146,9 +198,20 @@ pub fn install() -> Result<()> {
 }
 
 pub fn uninstall() -> Result<()> {
+    if let Some(s) = brand::get().service {
+        return (s.uninstall)();
+    }
+    uninstall_unit()
+}
+
+/// Stops and removes agl's own launchd agent or systemd unit, whatever the
+/// brand's [`brand::ServiceBackend`].
+pub fn uninstall_unit() -> Result<()> {
     let Some(path) = unit_path() else { return Ok(()) };
+    let had_legacy = legacy_plist().is_some();
+    remove_legacy();
     if !path.exists() {
-        println!("autostart not installed");
+        println!("{}", if had_legacy { "autostart removed" } else { "autostart not installed" });
         return Ok(());
     }
     if cfg!(target_os = "macos") {
@@ -178,13 +241,13 @@ mod tests {
     #[test]
     fn service_daemon_is_recognized() {
         if cfg!(target_os = "macos") {
-            assert!(started_by_service(label(), unit(), Some("cc.agl.daemon"), ""));
+            assert!(started_by_service(label(), unit(), Some("run.agl.daemon"), ""));
             // `agl start` from a shell: XPC_SERVICE_NAME is the terminal's or unset.
             assert!(!started_by_service(label(), unit(), Some("application.com.apple.Terminal.123"), ""));
             assert!(!started_by_service(label(), unit(), None, ""));
             // A branded build answers to its own label only.
             assert!(started_by_service("com.example.link", "example-link.service", Some("com.example.link"), ""));
-            assert!(!started_by_service("com.example.link", "example-link.service", Some("cc.agl.daemon"), ""));
+            assert!(!started_by_service("com.example.link", "example-link.service", Some("run.agl.daemon"), ""));
         } else if cfg!(target_os = "linux") {
             assert!(started_by_service(label(), unit(), None, "0::/user.slice/user-1000.slice/user@1000.service/app.slice/agl.service\n"));
             assert!(!started_by_service(label(), unit(), None, "0::/user.slice/user-1000.slice/session-3.scope\n"));
@@ -195,6 +258,6 @@ mod tests {
 
     #[test]
     fn default_label_and_unit_are_agl() {
-        assert_eq!((label(), unit()), ("cc.agl.daemon", "agl.service"));
+        assert_eq!((label(), unit()), ("run.agl.daemon", "agl.service"));
     }
 }
