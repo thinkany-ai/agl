@@ -52,6 +52,12 @@ pub struct Brand {
     /// when the person turns it on. A product whose own app ships the
     /// computer-use helper may turn it on for its links.
     pub computer_use_default: bool,
+    /// Whether a hub link that does not say runs its sessions' agents with
+    /// their own data homes (`HubLink::isolated_agents`). Off for agl.
+    pub isolated_agents_default: bool,
+    /// Whether a hub link that does not say may set a session's
+    /// `instructions` (`HubLink::instructions`). Off for agl.
+    pub hub_instructions_default: bool,
 }
 
 /// A product name and version, as hubs see it (`hello.product`).
@@ -75,6 +81,8 @@ impl Default for Brand {
             blocked_apps: Vec::new(),
             product: None,
             computer_use_default: false,
+            isolated_agents_default: false,
+            hub_instructions_default: false,
         }
     }
 }
@@ -142,7 +150,7 @@ mod tests {
         assert_eq!(b.systemd_unit, "agl.service");
         assert_eq!(b.releases.as_deref(), Some(AGL_RELEASES));
         assert!(b.home.is_none() && b.allowed_hubs.is_none() && b.computer_helper.is_none() && b.product.is_none());
-        assert!(!b.computer_use_default);
+        assert!(!b.computer_use_default && !b.isolated_agents_default && !b.hub_instructions_default);
         // Unit tests never set a brand: get() is the default.
         assert_eq!(get(), &Brand::default());
         // Set once: the brand was read above, so setting fails.

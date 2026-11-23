@@ -257,6 +257,11 @@ that sets any of them (a non-empty `extra_args`, a non-blank `instructions`,
 They are stored with the session (in `sessions.json`, 0600) and used every
 time its process starts, including after suspension or a daemon restart.
 
+Exception (agl 0.3.18): a hub may set `instructions` when the person allows
+it on this computer — the link's `instructions: true` in `config.json`, or a
+branded build's `hub_instructions_default`. `extra_args` and `ephemeral` stay
+local only. A hub never sees `instructions` back in session metadata.
+
 | field | effect | agents |
 |---|---|---|
 | `extra_args: string[]` | Appended to the agent's launch arguments, after agl's own. | every agent (`extra_args` feature): claude after its flags; codex after `app-server …`; ACP after the agent's own args; cursor before the `--` that precedes the prompt; pi at the end |

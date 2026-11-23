@@ -26,6 +26,8 @@ fn home() -> &'static PathBuf {
             blocked_apps: vec!["com.example.desktop".into()],
             product: Some(Product { name: "example-desktop".into(), version: "9.1.0".into() }),
             computer_use_default: true,
+            isolated_agents_default: false,
+            hub_instructions_default: false,
         })
         .unwrap();
         dir

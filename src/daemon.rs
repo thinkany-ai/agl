@@ -465,6 +465,7 @@ fn for_caller(mut m: SessionMeta, origin: &Origin) -> SessionMeta {
     if *origin != Origin::Local {
         m.extra_args.clear();
         m.instructions = None;
+        m.agent_home = None;
     }
     m
 }
@@ -572,7 +573,9 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
                 // Defaults (null, false, [], "") are what a generic client
                 // sends for "not set": only a value that would change the
                 // launch is refused.
-                if let Some(k) = LOCAL_ONLY_CREATE_FIELDS.iter().find(|k| launch_setting_in_effect(&params[**k])) {
+                // A hub the person allows may set `instructions`.
+                let allowed = |k: &str| k == "instructions" && origin.may_set_instructions(&mgr.cfg());
+                if let Some(k) = LOCAL_ONLY_CREATE_FIELDS.iter().find(|k| launch_setting_in_effect(&params[**k]) && !allowed(k)) {
                     return Err(anyhow!("`{k}` is accepted from local connections only (`extra_args`, `instructions`, `ephemeral`)"));
                 }
             }

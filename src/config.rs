@@ -123,6 +123,18 @@ pub struct HubLink {
     /// agl).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer_use: Option<bool>,
+    /// Run this hub's new Claude Code and Codex sessions with data homes of
+    /// their own (`$AGL_HOME/agents/<agent>`), signed in with the person's
+    /// login, so their conversations stay out of the person's own history
+    /// and apps. Only the person sets it, on this computer; unset: the
+    /// build's default (off for agl). See `agents::isolation`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolated_agents: Option<bool>,
+    /// Let this hub set a session's `instructions` (system / developer
+    /// instructions, otherwise local only). Only the person sets it, on this
+    /// computer; unset: the build's default (off for agl).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<bool>,
 }
 
 pub const TRANSPORTS: [&str; 2] = ["ws", "http"];
@@ -141,7 +153,7 @@ fn default_true() -> bool {
 
 impl HubLink {
     pub fn new(url: &str) -> HubLink {
-        HubLink { url: normalize_url(url), token: None, pair_code: None, access: default_remote_access(), share_local: true, transport: default_transport(), max_body: None, app_name: None, computer_use: None }
+        HubLink { url: normalize_url(url), token: None, pair_code: None, access: default_remote_access(), share_local: true, transport: default_transport(), max_body: None, app_name: None, computer_use: None, isolated_agents: None, instructions: None }
     }
 }
 
@@ -237,6 +249,17 @@ impl Config {
     /// Whether computer use is on for this hub (see `HubLink::computer_use`).
     pub fn computer_use_on(&self, url: &str) -> bool {
         self.hub(url).and_then(|h| h.computer_use).unwrap_or(crate::brand::get().computer_use_default)
+    }
+
+    /// Whether this hub's new sessions get agent data homes of their own
+    /// (see `HubLink::isolated_agents`).
+    pub fn isolated_agents_on(&self, url: &str) -> bool {
+        self.hub(url).and_then(|h| h.isolated_agents).unwrap_or(crate::brand::get().isolated_agents_default)
+    }
+
+    /// Whether this hub may set `instructions` (see `HubLink::instructions`).
+    pub fn hub_instructions_on(&self, url: &str) -> bool {
+        self.hub(url).and_then(|h| h.instructions).unwrap_or(crate::brand::get().hub_instructions_default)
     }
 
     pub fn load() -> Result<Config> {

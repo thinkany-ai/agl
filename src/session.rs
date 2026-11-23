@@ -105,6 +105,11 @@ pub struct SessionMeta {
     /// prompts name this app instead of agl.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_name: Option<String>,
+    /// The agent's own data home, apart from the person's: set at creation
+    /// for a hub with `isolated_agents`, and kept, so the native
+    /// conversation stays resumable (see `agents::isolation`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_home: Option<PathBuf>,
 }
 
 fn yes() -> bool {
@@ -153,6 +158,15 @@ impl Origin {
         match self {
             Origin::Local => true,
             Origin::Hub { url, share_local } => session_origin == url || (*share_local && session_origin == "local"),
+        }
+    }
+
+    /// Whether this caller may set a session's `instructions`: local
+    /// clients, and hubs the person allows (`HubLink::instructions`).
+    pub fn may_set_instructions(&self, cfg: &crate::config::Config) -> bool {
+        match self {
+            Origin::Local => true,
+            Origin::Hub { url, .. } => cfg.hub_instructions_on(url),
         }
     }
 
@@ -401,8 +415,11 @@ impl Manager {
             bail!("a hub cannot create a `local` session: it would be hidden from that hub too");
         }
         let instructions = p.instructions.clone().filter(|t| !t.trim().is_empty());
-        if origin != Origin::Local && (!p.extra_args.is_empty() || instructions.is_some() || p.ephemeral) {
-            bail!("`extra_args`, `instructions` and `ephemeral` are accepted from local connections only");
+        if origin != Origin::Local && (!p.extra_args.is_empty() || p.ephemeral) {
+            bail!("`extra_args` and `ephemeral` are accepted from local connections only");
+        }
+        if instructions.is_some() && !origin.may_set_instructions(&cfg) {
+            bail!("`instructions` are accepted from local connections, and from hubs this computer allows");
         }
         check_launch(&def, &p.extra_args, instructions.as_deref(), p.ephemeral)?;
         let app_name = match &p.app_name {
@@ -435,6 +452,12 @@ impl Manager {
         if !cwd.is_dir() {
             bail!("cwd `{}` is not a directory", cwd.display());
         }
+        // A hub's new conversation may get a data home of its own; one that
+        // resumes a conversation stays where that conversation is.
+        let agent_home = match &origin {
+            Origin::Hub { url, .. } if p.resume.is_none() && cfg.isolated_agents_on(url) => agents::isolation::home_for(def.protocol),
+            _ => None,
+        };
         let now = now_ms();
         let meta = SessionMeta {
             id: short_id(),
@@ -464,6 +487,7 @@ impl Manager {
             instructions,
             ephemeral: p.ephemeral,
             app_name,
+            agent_home,
         };
         let shared = self.start_actor(meta.clone());
         if p.warm {
@@ -1215,6 +1239,7 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                         ephemeral: m.ephemeral,
                         unattended: false,
                         app_name: m.app_name.clone(),
+                        agent_home: m.agent_home.clone(),
                     });
                     (spec, m.ephemeral && m.native_id.is_some())
                 };
