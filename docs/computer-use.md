@@ -1,7 +1,7 @@
 # 设计：内置 computer-use 与 browser-use（草案）
 
-状态：第一期已实现（agl 0.3.16；截图直传、去重与 `app_name` 参数见 0.3.17，第 4.1 节），接入说明见
-[local-tools.md](../skills/agl-integration/references/local-tools.md#computer-use-macos-agl-0316)
+状态：第一期已实现，随 agl 0.3.17 发布（截图直传、去重与 `app_name` 参数见第 4.1 节），接入说明见
+[local-tools.md](../skills/agl-integration/references/local-tools.md#computer-use-macos-agl-0317)
 和 [protocol.md](../skills/agl-integration/references/protocol.md)。
 
 ### 实现与本设计的出入
@@ -112,7 +112,7 @@ window "Untitled — Notes" [1]
 ### 3.3 坐标与截图
 
 - 截图用 ScreenCaptureKit 只截目标窗口，被遮挡、在后台的窗口也能截到。
-- 长边缩放到不超过 1280px（0.3.17 起；0.3.16 为 1568px），格式为 JPEG，质量 70（0.3.16 为 80）。
+- 长边缩放到不超过 1280px，格式为 JPEG，质量 70。
 - 坐标一律使用**截图像素坐标**，原点在窗口左上角，由 agl 换算成屏幕坐标。结果中带 `screenshot: {width, height, scale}`。
 
 ## 4. 结果格式：图片

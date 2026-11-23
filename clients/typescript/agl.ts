@@ -110,7 +110,7 @@ export interface CreateSession {
 
 /** agl 0.3.14+: built-in tools need no installed coding agent or model key. */
 export type BuiltinToolName = "read" | "write" | "edit" | "exec" | ComputerToolName;
-/** agl 0.3.16+ (macOS): operate the Mac's apps in the background. */
+/** agl 0.3.17+ (macOS): operate the Mac's apps in the background. */
 export type ComputerToolName =
   | "computer_list_apps" | "computer_get_state" | "computer_click" | "computer_type" | "computer_key"
   | "computer_scroll" | "computer_drag" | "computer_set_value" | "computer_action" | "computer_open_app";
@@ -151,7 +151,7 @@ export interface ToolCallOptions {
   /** Scopes an `allow_session` answer, e.g. your conversation id. Computer
    * tools also keep their state and `computer.stop` per session. */
   session?: string;
-  /** Computer tools: return screenshots as base64 `images` (0.3.16+). */
+  /** Computer tools: return screenshots as base64 `images` (0.3.17+). */
   images?: boolean;
   /** Computer tools: the product the helper runs under, so macOS asks for
    *  its permissions in that name, when the link has no app name of its
@@ -444,7 +444,7 @@ export class AglClient {
   /** Answers a held call; allow / allow_session return the tool's result. */
   approveTool = <T = unknown>(approvalId: string, decision: "allow" | "allow_session" | "deny") =>
     this.call<T>("tools.approve", { approval_id: approvalId, decision });
-  /** 0.3.16+ (macOS): Accessibility and Screen Recording for this link's product; `request` asks macOS and opens System Settings. */
+  /** 0.3.17+ (macOS): Accessibility and Screen Recording for this link's product; `request` asks macOS and opens System Settings. */
   computerPermissions = (opts: { request?: boolean; app_name?: string } = {}) =>
     this.call<{ accessibility: "granted" | "denied"; screen_recording: "granted" | "denied"; app_name: string }>("computer.permissions", opts);
   /** The person pressed stop: computer tools in `session` fail with stopped_by_user until computerReset. */

@@ -132,7 +132,7 @@ use the existing process reaper when their tracked root is still alive.
 Without approvals (below), the link policy applies to both `tools.call` and
 the direct APIs:
 
-Computer tools have their own rules, see [Computer use](#computer-use-macos-agl-0316).
+Computer tools have their own rules, see [Computer use](#computer-use-macos-agl-0317).
 
 | Caller | Tools exposed by `tools.list` |
 |---|---|
@@ -201,7 +201,7 @@ if (isApprovalRequired(r)) {
 }
 ```
 
-## Computer use (macOS, agl 0.3.16+)
+## Computer use (macOS, agl 0.3.17+)
 
 Ten `computer_*` tools let the cloud model operate the Mac's apps the way
 Codex's Computer Use does, with no coding agent installed: it reads a
