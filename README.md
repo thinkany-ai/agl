@@ -81,6 +81,7 @@ How each kind of product uses agl:
 |---|---|---|
 | Desktop app (Electron, native), agents only needed while it's open | Bundle agl as a sidecar: `agl daemon --port 0 --parent-pid <pid>` with its own `AGL_HOME` | [desktop-app.md](skills/agl-integration/references/desktop-app.md) |
 | Rust desktop app (Tauri, GPUI) | Link the `agl` crate and use `Manager` in-process | [desktop-app.md#rust-in-process](skills/agl-integration/references/desktop-app.md#rust-in-process) |
+| Product shipping agl under its own name (own CLI, daemon inside its app, own computer-use helper) | `agl::brand::set`, then `agl::cli::run()` or `agl::daemon::spawn_embedded` | [desktop-app.md#embedding-and-branding-agl-0317](skills/agl-integration/references/desktop-app.md#embedding-and-branding-agl-0317) |
 | Cloud app with its own model / agent loop | Install agl and call `tools.list` / `tools.call`; no agent session or local model key | [local-tools.md](skills/agl-integration/references/local-tools.md) |
 | Web product | The user runs `curl …/install.sh?code=… \| sh`; the machine dials out to your backend | [web-product.md](skills/agl-integration/references/web-product.md) |
 | Any product that only needs the list of installed agents | `agl agents --json` (no daemon), or `agents.list` | [discovery.md](skills/agl-integration/references/discovery.md) |

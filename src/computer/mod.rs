@@ -17,6 +17,10 @@ mod mac;
 
 /// The argument that runs agl as the computer-use helper.
 pub const HELPER_ARG: &str = "__computer";
+/// Passed after [`HELPER_ARG`] to a brand's own helper executable
+/// (`Brand::computer_helper`): it first makes itself responsible for itself,
+/// so macOS attributes Accessibility and Screen Recording to its bundle.
+pub const RESPONSIBLE_ARG: &str = "--responsible";
 
 /// Built-in computer tools, in `tools.list` order.
 pub const TOOLS: &[&str] = &[
@@ -32,13 +36,27 @@ pub const TOOLS: &[&str] = &[
     "computer_open_app",
 ];
 
-/// Whether this build and process can run the helper.
+/// Whether this build and process can run the helper: agl itself (started
+/// through `hold_from_args`), or a brand's own helper executable.
 pub fn supported() -> bool {
-    cfg!(target_os = "macos") && crate::app::can_hold()
+    cfg!(target_os = "macos") && (crate::app::can_hold() || crate::brand::get().computer_helper.is_some())
 }
 
+/// The computer-use helper: reads requests on stdin until it closes or
+/// idles. A brand's helper executable calls this from `main` and exits with
+/// its code; agl calls it for `agl __computer`.
 #[cfg(target_os = "macos")]
-pub use helper::run as helper_main;
+pub fn helper_main() -> i32 {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if args.iter().any(|a| a == RESPONSIBLE_ARG) {
+        // Started by a host's daemon: take responsibility for this process
+        // (same pid and pipes), then serve. Without the flag it serves at once.
+        let me = args.first().cloned().unwrap_or_default();
+        let rest: Vec<&std::ffi::OsStr> = args.iter().filter(|a| *a != RESPONSIBLE_ARG).map(|a| a.as_os_str()).collect();
+        crate::app::reexec_responsible(&me, &rest);
+    }
+    helper::run()
+}
 
 #[cfg(not(target_os = "macos"))]
 pub fn helper_main() -> i32 {

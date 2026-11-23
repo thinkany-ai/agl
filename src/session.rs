@@ -312,7 +312,7 @@ impl Manager {
             *shared.history.lock().unwrap() = history;
             // The previous daemon died without ending these turns.
             for turn_id in &unfinished {
-                let error = Some("the agl daemon stopped during this turn".into());
+                let error = Some(format!("the {} daemon stopped during this turn", crate::brand::get().display_name));
                 self.emit(&shared, AgentEvent::TurnEnded { turn_id: turn_id.clone(), outcome: "aborted".into(), error, usage: None, timing: None, text: None });
             }
             if !unfinished.is_empty() {
@@ -943,10 +943,10 @@ async fn actor(mgr: Arc<Manager>, shared: Arc<Shared>, mut rx: mpsc::UnboundedRe
                     Cmd::Close { done, shutdown } => {
                         // Every turn this ends gets its turn_ended, so no client
                         // (or history reader) waits for it forever.
-                        let error = if shutdown { "the agl daemon stopped" } else { "the session was closed" };
+                        let error = if shutdown { format!("the {} daemon stopped", crate::brand::get().display_name) } else { "the session was closed".to_string() };
                         let ended = current.take().map(|r| (r.turn_id.clone(), Some(timing(&r)))).into_iter().chain(queue.drain(..).map(|(t, _)| (t, None)));
                         for (turn_id, timing) in ended.collect::<Vec<_>>() {
-                            emit!(AgentEvent::TurnEnded { turn_id, outcome: "aborted".into(), error: Some(error.into()), usage: None, timing, text: None });
+                            emit!(AgentEvent::TurnEnded { turn_id, outcome: "aborted".into(), error: Some(error.clone()), usage: None, timing, text: None });
                         }
                         if shutdown {
                             save_history(&shared);

@@ -1,6 +1,6 @@
 # 设计：内置 computer-use 与 browser-use（草案）
 
-状态：第一期已实现（agl 0.3.16），接入说明见
+状态：第一期已实现（agl 0.3.16；截图直传、去重与 `app_name` 参数见 0.3.17，第 4.1 节），接入说明见
 [local-tools.md](../skills/agl-integration/references/local-tools.md#computer-use-macos-agl-0316)
 和 [protocol.md](../skills/agl-integration/references/protocol.md)。
 
@@ -112,7 +112,7 @@ window "Untitled — Notes" [1]
 ### 3.3 坐标与截图
 
 - 截图用 ScreenCaptureKit 只截目标窗口，被遮挡、在后台的窗口也能截到。
-- 长边缩放到不超过 1568px（Claude 与 OpenAI 的视觉输入都在这个范围内）。格式默认 JPEG（质量 80），带透明度时用 PNG。
+- 长边缩放到不超过 1280px（0.3.17 起；0.3.16 为 1568px），格式为 JPEG，质量 70（0.3.16 为 80）。
 - 坐标一律使用**截图像素坐标**，原点在窗口左上角，由 agl 换算成屏幕坐标。结果中带 `screenshot: {width, height, scale}`。
 
 ## 4. 结果格式：图片
@@ -133,7 +133,15 @@ window "Untitled — Notes" [1]
 
 - 图片超过 4 MB 时，带 `omitted: true`，不带 `data`，与现有规则一致。
 - 不认识 `images` 字段的旧 hub 会照常把整个结果序列化给模型，这就是 base64 文本，浪费 token。所以只有调用方声明 `images: true` 时才返回图片（`tools.call {…, images: true}`）；否则 `images` 里只有 `omitted: true`。
-- TypeScript 客户端新增辅助函数 `toModelContent(result)`：拆出 `images`，返回 `[{type: "text", text: JSON.stringify(rest)}, ...图片块]`，分别给出 Anthropic 和 OpenAI 两种格式的写法。
+- TypeScript 客户端新增辅助函数 `toModelContent(result)`：拆出 `images`，返回 `[{type: "text", text: JSON.stringify(rest)}, ...图片块]`，分别给出 Anthropic 和 OpenAI 两种格式的写法。没有 `data` 的图片（`omitted`、`uploaded`、`unchanged`）不放进去。
+
+### 4.1 截图直传、去重与产品名（0.3.17）
+
+链路有请求体上限（`max_body`）时，一张截图要切成几十个分片顺序发送，每一步都慢。0.3.17 在 `tools.call` 上新增三项，旧调用方不受影响：
+
+- **`image_upload: {url}`**（需同时 `images: true`）：daemon 把截图的 JPEG 字节 `PUT` 到这个签名地址（`Content-Type: image/jpeg`，30 秒超时，不跟随重定向；只接受 HTTPS，或指向本机的 HTTP），结果中的图片变成 `{mime_type, uploaded: true, bytes}`，`bytes` 是 base64 长度，即原来 `data` 的长度。上传失败时照旧内联 `data`，并在 `warnings` 里加一条 `image_upload_failed: <原因>`。错误信息和日志都不包含这个地址，它是签名凭据。
+- **不变的截图不重发**：按（链路、`session`、bundle id、窗口 id）记住最后发出的截图的哈希；新截图相同时，图片变成 `{mime_type, unchanged: true}`，既不内联也不上传。显式 `screenshot: true` 同样去重。`computer.reset {session}` 清空该会话的记录。
+- **`app_name`**：链路本身没有 `app_name` 时（例如由网页配对流程建立的链路），辅助进程以调用方给的产品名运行，macOS 的辅助功能和屏幕录制授权因此归属该产品的 launcher；链路自己的 `app_name` 优先。`computer.permissions` 同样接受 `app_name`。等待审批的调用会保存这些选项，批准后照常生效。
 
 ## 5. 进程结构与系统权限
 

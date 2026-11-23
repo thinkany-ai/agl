@@ -40,6 +40,25 @@ pub struct Daemon {
     pub port: Mutex<u16>,
 }
 
+/// `reload`'s value once the daemon stops: the hub links end
+/// (link::supervise) and no reload follows.
+pub const STOPPING: u64 = u64::MAX;
+
+impl Daemon {
+    /// Bumps `reload` (the hub configuration changed), unless stopping.
+    pub fn bump_reload(&self) {
+        self.reload.send_modify(|g| {
+            if *g != STOPPING {
+                *g += 1;
+            }
+        });
+    }
+
+    pub fn is_stopping(&self) -> bool {
+        *self.reload.borrow() == STOPPING
+    }
+}
+
 #[derive(Default)]
 pub struct DaemonOptions {
     /// 0 = pick a free port (written to daemon.json).
@@ -51,10 +70,113 @@ pub struct DaemonOptions {
 }
 
 pub async fn run(cfg: Config, opts: DaemonOptions) -> Result<()> {
+    let started = start(cfg, opts).await?;
+    // Machine-readable line for sidecar hosts that read our stdout.
+    println!("{}", started.info);
+    let d = started.daemon.clone();
+    let serve = axum::serve(started.listener, started.app).with_graceful_shutdown(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = d.shutdown.notified() => {}
+            _ = terminate() => {}
+        }
+        d.tools.executions.shutdown().await;
+    });
+    serve.await?;
+    stop(&started.daemon, started.tasks).await;
+    Ok(())
+}
+
+/// A daemon serving inside the host's own process and tokio runtime
+/// ([`spawn_embedded`]). Its local API is on `127.0.0.1:port` with `token`,
+/// as for a separate daemon, and `daemon.json` in the home says so.
+pub struct EmbeddedDaemon {
+    pub port: u16,
+    pub token: String,
+    daemon: Arc<Daemon>,
+    serve: tokio::task::JoinHandle<()>,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl EmbeddedDaemon {
+    /// Turns running, starting, waiting or queued, plus running executions:
+    /// what [`shutdown`](Self::shutdown) would end.
+    pub fn busy(&self) -> usize {
+        let list = self.daemon.mgr.list();
+        list.iter().filter(|m| !crate::session::is_idle(m)).count() + self.daemon.tools.executions.busy_counts(&Origin::Local).0
+    }
+
+    /// Whether the local API is still serving (false after a
+    /// `daemon.shutdown` request or a failure).
+    pub fn is_running(&self) -> bool {
+        !self.serve.is_finished()
+    }
+
+    /// Stops it: hub links, then executions and agent sessions (ending their
+    /// turns), and removes `daemon.json`.
+    pub async fn shutdown(self) {
+        self.daemon.shutdown.notify_one();
+        let _ = self.serve.await;
+        stop(&self.daemon, self.tasks).await;
+    }
+}
+
+/// Starts a daemon inside the caller's tokio runtime and returns once it
+/// listens. For apps that host agl in their own process instead of running
+/// the `daemon` command (set the brand first). One daemon per home still
+/// holds: this fails while another process serves the same home.
+pub async fn spawn_embedded(cfg: Config, opts: DaemonOptions) -> Result<EmbeddedDaemon> {
+    let started = start(cfg, opts).await?;
+    let d = started.daemon.clone();
+    let serve = tokio::spawn(async move {
+        let stopped = d.clone();
+        let r = axum::serve(started.listener, started.app)
+            .with_graceful_shutdown(async move {
+                stopped.shutdown.notified().await;
+                stopped.tools.executions.shutdown().await;
+            })
+            .await;
+        if let Err(e) = r {
+            eprintln!("{} daemon: {e:#}", crate::brand::get().display_name);
+        }
+    });
+    Ok(EmbeddedDaemon { port: started.port, token: started.daemon.token.clone(), daemon: started.daemon, serve, tasks: started.tasks })
+}
+
+struct Started {
+    daemon: Arc<Daemon>,
+    listener: tokio::net::TcpListener,
+    app: Router,
+    port: u16,
+    info: Value,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+/// Homes a daemon serves in this process (an embedding host could start
+/// two; daemon.json's pid check only tells other processes apart).
+static SERVING: Mutex<Vec<std::path::PathBuf>> = Mutex::new(Vec::new());
+
+async fn start(cfg: Config, opts: DaemonOptions) -> Result<Started> {
     STARTED_AT.get_or_init(crate::protocol::now_ms);
+    let name = &crate::brand::get().display_name;
     let explicit_port = opts.port.is_some();
     let port = opts.port.unwrap_or(cfg.port);
     std::fs::create_dir_all(config::home())?;
+    {
+        let mut serving = SERVING.lock().unwrap();
+        if serving.contains(&config::home()) {
+            anyhow::bail!("a {name} daemon is already running in this process for {}", config::home().display());
+        }
+        serving.push(config::home());
+    }
+    let started = start_serving(cfg, opts, name, explicit_port, port).await;
+    if started.is_err() {
+        SERVING.lock().unwrap().retain(|h| *h != config::home());
+    }
+    started
+}
+
+async fn start_serving(cfg: Config, opts: DaemonOptions, name: &str, explicit_port: bool, port: u16) -> Result<Started> {
     // One daemon per AGL_HOME.
     if let Some(pid) = std::fs::read_to_string(config::daemon_file())
         .ok()
@@ -62,12 +184,12 @@ pub async fn run(cfg: Config, opts: DaemonOptions) -> Result<()> {
         .and_then(|v| v["pid"].as_u64())
     {
         if pid as u32 != std::process::id() && pid_alive(pid as u32) {
-            anyhow::bail!("an agl daemon (pid {pid}) is already running for {}", config::home().display());
+            anyhow::bail!("a {name} daemon (pid {pid}) is already running for {}", config::home().display());
         }
     }
     let reaped = agents::reap_orphans();
     if reaped > 0 {
-        eprintln!("agl: stopped {reaped} agent process(es) left by a previous daemon");
+        eprintln!("{name}: stopped {reaped} agent process(es) left by a previous daemon");
     }
     // Resolve the login-shell environment off the request path.
     tokio::task::spawn_blocking(crate::shellenv::warm_up);
@@ -88,33 +210,36 @@ pub async fn run(cfg: Config, opts: DaemonOptions) -> Result<()> {
         port: Mutex::new(port),
     });
 
+    let mut tasks = Vec::new();
     // Garbage collector.
     {
         let mgr = mgr.clone();
         let d = daemon.clone();
-        tokio::spawn(async move {
+        tasks.push(tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(30));
             loop {
                 tick.tick().await;
                 mgr.gc(false).await;
                 d.tools.executions.gc();
             }
-        });
+        }));
     }
     if let Some(ppid) = opts.parent_pid {
         let d = daemon.clone();
-        tokio::spawn(async move {
+        let name = name.to_string();
+        tasks.push(tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 if !pid_alive(ppid) {
-                    eprintln!("agl: parent process {ppid} exited; shutting down");
+                    eprintln!("{name}: parent process {ppid} exited; shutting down");
                     d.shutdown.notify_one();
                     break;
                 }
             }
-        });
+        }));
     }
-    tokio::spawn(crate::link::supervise(daemon.clone()));
+    // Last: stop() waits for it to end the links.
+    tasks.push(tokio::spawn(crate::link::supervise(daemon.clone())));
 
     let app = Router::new()
         .route("/health", get(|| async { Json(json!({"ok": true, "version": VERSION})) }))
@@ -125,40 +250,49 @@ pub async fn run(cfg: Config, opts: DaemonOptions) -> Result<()> {
         // The default port is taken (another AGL_HOME, another app): any free
         // port works, since clients read it from daemon.json.
         Err(e) if !explicit_port && e.kind() == std::io::ErrorKind::AddrInUse => {
-            eprintln!("agl: port {port} is in use; picking a free one");
+            eprintln!("{name}: port {port} is in use; picking a free one");
             tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?
         }
-        Err(e) => return Err(e).with_context(|| format!("bind 127.0.0.1:{port}")),
+        Err(e) => {
+            for t in &tasks {
+                t.abort();
+            }
+            return Err(e).with_context(|| format!("bind 127.0.0.1:{port}"));
+        }
     };
     let port = listener.local_addr()?.port();
     *daemon.port.lock().unwrap() = port;
     let info = json!({"pid": std::process::id(), "port": port, "token": daemon.token, "version": VERSION});
     config::write_private(&config::daemon_file(), info.to_string().as_bytes())?;
-    eprintln!("agl daemon {VERSION} listening on 127.0.0.1:{port} (home {})", config::home().display());
-    // Machine-readable line for sidecar hosts that read our stdout.
-    println!("{info}");
+    eprintln!("{name} daemon {} listening on 127.0.0.1:{port} (home {})", crate::brand::version(), config::home().display());
+    Ok(Started { daemon, listener, app, port, info, tasks })
+}
 
-    let d = daemon.clone();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
-                _ = d.shutdown.notified() => {}
-                _ = terminate() => {}
-            }
-            d.tools.executions.shutdown().await;
-        })
-        .await?;
-    eprintln!("agl daemon shutting down");
+/// After the local API stopped: end the links and background tasks, then
+/// executions and sessions, and remove `daemon.json` if it is still ours.
+async fn stop(daemon: &Arc<Daemon>, tasks: Vec<tokio::task::JoinHandle<()>>) {
+    eprintln!("{} daemon shutting down", crate::brand::get().display_name);
+    daemon.reload.send_replace(STOPPING);
+    // The last task is the link supervisor: it ends every link once it sees
+    // `stopping`. The others (gc, parent watch) loop until aborted.
+    let mut tasks = tasks;
+    if let Some(mut supervise) = tasks.pop() {
+        if tokio::time::timeout(Duration::from_secs(2), &mut supervise).await.is_err() {
+            supervise.abort();
+        }
+    }
+    for t in tasks {
+        t.abort();
+    }
     daemon.tools.executions.shutdown().await;
-    mgr.shutdown_all().await;
+    daemon.mgr.shutdown_all().await;
     // Only remove the file if it is still ours.
     if let Ok(s) = std::fs::read_to_string(config::daemon_file()) {
         if serde_json::from_str::<Value>(&s).ok().and_then(|v| v["pid"].as_u64()) == Some(std::process::id() as u64) {
             let _ = std::fs::remove_file(config::daemon_file());
         }
     }
-    Ok(())
+    SERVING.lock().unwrap().retain(|h| *h != config::home());
 }
 
 fn pid_alive(pid: u32) -> bool {
@@ -307,6 +441,7 @@ pub async fn machine_info(cfg: &Config) -> MachineInfo {
         protocol: PROTOCOL,
         agents: agents::detect(cfg, false).await,
         tools: crate::machine::tool_names(),
+        product: crate::brand::get().product.clone(),
     }
 }
 
@@ -405,7 +540,7 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
             let fresh = Config::load()?;
             crate::shellenv::set_extra_paths(&fresh.extra_paths);
             *mgr.cfg.write().unwrap() = fresh;
-            d.reload.send_modify(|g| *g += 1);
+            d.bump_reload();
             json!({"ok": true})
         }
         "env.reload" if local => {
@@ -414,7 +549,7 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
             let fresh = Config::load()?;
             crate::shellenv::set_extra_paths(&fresh.extra_paths);
             *mgr.cfg.write().unwrap() = fresh;
-            d.reload.send_modify(|g| *g += 1);
+            d.bump_reload();
             tokio::task::spawn_blocking(crate::shellenv::reload).await?;
             json!({"ok": true, "path": crate::shellenv::path_entries()})
         }

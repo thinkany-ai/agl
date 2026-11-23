@@ -78,6 +78,7 @@ agl status | start | stop
 |---|---|---|
 | 桌面 App（Electron / 原生），关掉 App 就不用 | 作为 sidecar 打包：`agl daemon --port 0 --parent-pid <pid>`，使用独立的 `AGL_HOME` | [desktop-app.md](skills/agl-integration/references/desktop-app.md) |
 | Rust 桌面 App（Tauri / GPUI） | 直接链接 `agl` crate，在进程内使用 `Manager` | [desktop-app.md#rust-in-process](skills/agl-integration/references/desktop-app.md#rust-in-process) |
+| 以自己的名义发布 agl 的产品（自己的命令行、App 内常驻 daemon、自己的 computer-use 辅助 App） | 先 `agl::brand::set`，再 `agl::cli::run()` 或 `agl::daemon::spawn_embedded` | [desktop-app.md#embedding-and-branding-agl-0317](skills/agl-integration/references/desktop-app.md#embedding-and-branding-agl-0317) |
 | Web 产品 | 用户执行 `curl …/install.sh?code=… \| sh`，机器主动外连到你的后端 | [web-product.md](skills/agl-integration/references/web-product.md) |
 | 只需要本机已安装 agent 列表的产品 | `agl agents --json`（无需 daemon），或 `agents.list` | [discovery.md](skills/agl-integration/references/discovery.md) |
 | 已有自研运行时 / daemon | 保留你的配对和传输层，只把执行层换成 agl | [existing-runtime.md](skills/agl-integration/references/existing-runtime.md) |

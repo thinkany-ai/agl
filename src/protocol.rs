@@ -199,6 +199,10 @@ pub struct MachineInfo {
     /// no turn the hub saw running on the old one is running any more.
     #[serde(default)]
     pub started_at: u64,
+    /// The product this build is, when it ships agl under its own name
+    /// (`brand::Product`): hubs can tell which app a machine runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product: Option<crate::brand::Product>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

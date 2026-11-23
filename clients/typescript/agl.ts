@@ -25,7 +25,18 @@ export type Access = "full" | "edit" | "ask" | "read_only";
 export type Decision = "allow" | "allow_session" | "deny";
 
 /** An image a tool returned (base64). `omitted` images carry no data. */
-export interface ToolImage { mime_type: string; data: string; omitted?: boolean }
+/** An image in a tool result. `data` is base64, absent when the image was
+ *  `omitted` (too large, or images not asked for), `uploaded` to the
+ *  caller's `imageUpload` URL (`bytes`: what `data` would have measured), or
+ *  `unchanged` since the last screenshot sent for that window (0.3.17+). */
+export interface ToolImage {
+  mime_type: string;
+  data?: string;
+  omitted?: boolean;
+  uploaded?: boolean;
+  bytes?: number;
+  unchanged?: boolean;
+}
 
 export type AgentEvent =
   | { kind: "status"; status: "idle" | "starting" | "running" | "waiting" | "suspended" | "closed" }
@@ -142,6 +153,13 @@ export interface ToolCallOptions {
   session?: string;
   /** Computer tools: return screenshots as base64 `images` (0.3.16+). */
   images?: boolean;
+  /** Computer tools: the product the helper runs under, so macOS asks for
+   *  its permissions in that name, when the link has no app name of its
+   *  own (0.3.17+). */
+  app_name?: string;
+  /** Computer tools, with `images: true`: PUT each new screenshot (JPEG) to
+   *  this signed URL instead of returning its bytes (0.3.17+). */
+  imageUpload?: { url: string };
 }
 
 /**
@@ -154,7 +172,8 @@ export function toModelContent(result: unknown, provider: "anthropic" | "openai"
   const images = (Array.isArray(r.images) ? r.images : []) as ToolImage[];
   delete r.images;
   const text = JSON.stringify(r);
-  const shown = images.filter((i) => !i.omitted && i.data);
+  // Images without data (omitted, uploaded, unchanged) stay out.
+  const shown = images.filter((i): i is ToolImage & { data: string } => !!i.data);
   if (provider === "openai") {
     return [{ type: "input_text", text }, ...shown.map((i) => ({ type: "input_image", image_url: `data:${i.mime_type};base64,${i.data}` }))];
   }
@@ -418,13 +437,15 @@ export class AglClient {
   /** Schemas filtered by this connection's access; map input_schema to your model provider's parameters field. */
   tools = (opts: { approvals?: boolean } = {}) => this.call<BuiltinTool[]>("tools.list", opts);
   /** With `approvals`, the result may be `ApprovalRequired`: answer it with approveTool. */
-  callTool = <T = unknown>(name: BuiltinToolName, args: Record<string, unknown>, opts: ToolCallOptions = {}) =>
-    this.call<T | ApprovalRequired>("tools.call", { name, arguments: args, ...opts });
+  callTool = <T = unknown>(name: BuiltinToolName, args: Record<string, unknown>, opts: ToolCallOptions = {}) => {
+    const { imageUpload, ...rest } = opts;
+    return this.call<T | ApprovalRequired>("tools.call", { name, arguments: args, ...rest, ...(imageUpload ? { image_upload: imageUpload } : {}) });
+  };
   /** Answers a held call; allow / allow_session return the tool's result. */
   approveTool = <T = unknown>(approvalId: string, decision: "allow" | "allow_session" | "deny") =>
     this.call<T>("tools.approve", { approval_id: approvalId, decision });
   /** 0.3.16+ (macOS): Accessibility and Screen Recording for this link's product; `request` asks macOS and opens System Settings. */
-  computerPermissions = (opts: { request?: boolean } = {}) =>
+  computerPermissions = (opts: { request?: boolean; app_name?: string } = {}) =>
     this.call<{ accessibility: "granted" | "denied"; screen_recording: "granted" | "denied"; app_name: string }>("computer.permissions", opts);
   /** The person pressed stop: computer tools in `session` fail with stopped_by_user until computerReset. */
   computerStop = (session = "") => this.call<{ ok: boolean }>("computer.stop", { session });

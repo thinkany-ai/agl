@@ -532,7 +532,7 @@ pub(crate) async fn next_frame<R: AsyncBufRead + Unpin>(r: &mut R, max: usize) -
             }
             r.consume(i + 1);
             if overflow {
-                eprintln!("agl: dropped an agent frame larger than {max} bytes");
+                eprintln!("{}: dropped an agent frame larger than {max} bytes", crate::brand::get().display_name);
                 overflow = false;
                 out.clear();
                 continue;

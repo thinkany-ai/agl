@@ -2,6 +2,8 @@
 //! sha256 and swapped in for the running binary, then the daemon restarted on
 //! it. `agl update` runs it from the command line; a hub runs it with
 //! `daemon.update` (any link; below `full` it waits until its sessions are idle).
+//! A branded build updates from its brand's `releases` (binaries named
+//! `<cli_name>-<os>-<arch>`), or not at all when it has none.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -10,12 +12,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::{client, service};
+use crate::{brand, client, service};
 
-/// GitHub releases: `<base>/latest` redirects to `<base>/tag/v<version>`, and
-/// `<base>/download/v<version>/agl-<os>-<arch>` is the binary.
-const RELEASES: &str = "https://github.com/thinkany-ai/agl/releases";
-
+/// agl's own version (a branded build reports `brand::version()`).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Serialize)]
@@ -25,15 +24,24 @@ pub struct Check {
     pub update_available: bool,
 }
 
-/// `AGL_RELEASES_BASE` points at a mirror laid out like GitHub releases.
-fn base() -> String {
-    std::env::var("AGL_RELEASES_BASE").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| RELEASES.into()).trim_end_matches('/').to_string()
+/// Where releases are: `AGL_RELEASES_BASE` (a mirror laid out like GitHub
+/// releases: `<base>/latest` redirects to `<base>/tag/v<version>`, and
+/// `<base>/download/v<version>/<cli_name>-<os>-<arch>` is the binary), else
+/// the brand's. A brand without releases is updated with its app.
+fn base() -> Result<String> {
+    let b = brand::get();
+    std::env::var("AGL_RELEASES_BASE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| b.releases.clone())
+        .map(|s| s.trim_end_matches('/').to_string())
+        .ok_or_else(|| anyhow!("{} is updated with the app it came with, not on its own", b.display_name))
 }
 
 fn http(redirects: bool) -> Result<reqwest::Client> {
     let policy = if redirects { reqwest::redirect::Policy::limited(10) } else { reqwest::redirect::Policy::none() };
     Ok(reqwest::Client::builder()
-        .user_agent(format!("agl/{VERSION}"))
+        .user_agent(format!("{}/{}", brand::get().cli_name, brand::version()))
         .redirect(policy)
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(300))
@@ -42,7 +50,7 @@ fn http(redirects: bool) -> Result<reqwest::Client> {
 
 /// The newest released version.
 pub async fn latest() -> Result<String> {
-    let r = http(false)?.get(format!("{}/latest", base())).send().await.context("check for updates")?;
+    let r = http(false)?.get(format!("{}/latest", base()?)).send().await.context("check for updates")?;
     let location = r
         .headers()
         .get(reqwest::header::LOCATION)
@@ -58,7 +66,8 @@ pub async fn latest() -> Result<String> {
 
 pub async fn check() -> Result<Check> {
     let latest = latest().await?;
-    Ok(Check { update_available: newer(&latest, VERSION), current: VERSION.into(), latest })
+    let current = brand::version().to_string();
+    Ok(Check { update_available: newer(&latest, &current), current, latest })
 }
 
 fn parse(v: &str) -> Vec<u64> {
@@ -77,14 +86,15 @@ fn target() -> Result<&'static str> {
         ("macos", "x86_64") => "darwin-x64",
         ("linux", "aarch64") => "linux-arm64",
         ("linux", "x86_64") => "linux-x64",
-        (os, arch) => bail!("no agl release for {os}/{arch}"),
+        (os, arch) => bail!("no {} release for {os}/{arch}", brand::get().display_name),
     })
 }
 
 /// Download `version`, verify it, and put it in place of the running binary
 /// (atomically; the running process keeps its old copy). Restart separately.
 pub async fn install(version: &str) -> Result<PathBuf> {
-    let url = format!("{}/download/v{version}/agl-{}", base(), target()?);
+    let b = brand::get();
+    let url = format!("{}/download/v{version}/{}-{}", base()?, b.cli_name, target()?);
     let client = http(true)?;
     let get = |url: String| {
         let client = client.clone();
@@ -106,9 +116,9 @@ pub async fn install(version: &str) -> Result<PathBuf> {
 
     let exe = std::env::current_exe()?.canonicalize()?;
     if exe.to_string_lossy().contains(".app/Contents/") {
-        bail!("this agl is part of an app ({}); it is updated with the app", exe.display());
+        bail!("this {} is part of an app ({}); it is updated with the app", b.display_name, exe.display());
     }
-    let temp = exe.with_file_name(format!(".agl.update-{}", std::process::id()));
+    let temp = exe.with_file_name(format!(".{}.update-{}", b.cli_name, std::process::id()));
     std::fs::write(&temp, &binary)?;
     let result = (|| {
         #[cfg(unix)]
@@ -116,10 +126,10 @@ pub async fn install(version: &str) -> Result<PathBuf> {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))?;
         }
-        let out = std::process::Command::new(&temp).arg("--version").output().context("run the downloaded agl")?;
+        let out = std::process::Command::new(&temp).arg("--version").output().with_context(|| format!("run the downloaded {}", b.display_name))?;
         let printed = String::from_utf8_lossy(&out.stdout);
         if !out.status.success() || !printed.contains(version) {
-            bail!("the downloaded agl does not run here ({})", printed.trim());
+            bail!("the downloaded {} does not run here ({})", b.display_name, printed.trim());
         }
         std::fs::rename(&temp, &exe).with_context(|| format!("replace {}", exe.display()))
     })();

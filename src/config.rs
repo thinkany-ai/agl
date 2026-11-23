@@ -170,11 +170,16 @@ impl Default for Config {
     }
 }
 
+/// The state directory: `AGL_HOME`, else the brand's home, else `~/.agl`.
 pub fn home() -> PathBuf {
-    if let Ok(dir) = std::env::var("AGL_HOME") {
+    resolve_home(std::env::var("AGL_HOME").ok(), crate::brand::get().home.clone())
+}
+
+fn resolve_home(env: Option<String>, brand: Option<PathBuf>) -> PathBuf {
+    if let Some(dir) = env {
         return PathBuf::from(dir);
     }
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".agl")
+    brand.unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".agl"))
 }
 
 pub fn config_path() -> PathBuf {
@@ -271,6 +276,14 @@ pub fn hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_is_agl_home_then_the_brand_then_dot_agl() {
+        let brand = Some(PathBuf::from("/tmp/product-home"));
+        assert_eq!(resolve_home(Some("/tmp/env".into()), brand.clone()), PathBuf::from("/tmp/env"));
+        assert_eq!(resolve_home(None, brand), PathBuf::from("/tmp/product-home"));
+        assert!(resolve_home(None, None).ends_with(".agl"));
+    }
 
     #[test]
     fn hub_links_default_to_ask_and_share_local() {

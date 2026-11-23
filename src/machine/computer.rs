@@ -24,6 +24,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+
+use super::images::{Shots, ShotKey};
+pub use super::images::shape_images;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -33,8 +36,6 @@ use crate::session::Origin;
 
 /// Longest a helper request may take (opening an app waits for its window).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-/// Largest image handed back (base64 bytes); bigger ones are `omitted`.
-const MAX_IMAGE_B64: usize = 4 * 1024 * 1024 * 4 / 3;
 
 /// Bundle ids computer use never operates. A trailing `*` is a prefix.
 const BLOCKED: &[&str] = &[
@@ -77,10 +78,27 @@ fn matches(pattern: &str, id: &str) -> bool {
 
 /// Whether computer use must leave this app alone.
 pub fn blocked(cfg: &Config, bundle_id: &str) -> bool {
+    // A brand's own apps stay blocked whatever the config allows.
+    if crate::brand::get().blocked_apps.iter().any(|p| matches(p, bundle_id)) {
+        return true;
+    }
     if cfg.computer.allowed_blocked_apps.iter().any(|p| matches(p, bundle_id)) {
         return cfg.computer.blocked_apps.iter().any(|p| matches(p, bundle_id));
     }
     BLOCKED.iter().any(|p| matches(p, bundle_id)) || cfg.computer.blocked_apps.iter().any(|p| matches(p, bundle_id))
+}
+
+/// The name macOS shows for the process doing computer use without a
+/// product launcher: the brand helper's app bundle (`<Name>.app`), else
+/// the brand's display name.
+fn helper_name() -> String {
+    let b = crate::brand::get();
+    b.computer_helper
+        .as_deref()
+        .and_then(|p| p.ancestors().find(|a| a.extension().is_some_and(|e| e == "app")))
+        .and_then(|a| a.file_stem())
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| b.display_name.clone())
 }
 
 #[derive(Debug, PartialEq)]
@@ -95,13 +113,20 @@ pub fn level(cfg: &Config, origin: &Origin, approvals: bool) -> Level {
     if !crate::computer::supported() {
         return Level::Deny("computer use needs macOS".into());
     }
+    link_level(cfg, origin, approvals, "computer use")
+}
+
+/// The link rule for tools that act on the person's screen or behalf
+/// (computer use, host-registered tools): a `full` link may; `ask` / `edit`
+/// only with approvals; `read_only` never. Local clients always may.
+pub(super) fn link_level(cfg: &Config, origin: &Origin, approvals: bool, what: &str) -> Level {
     let Origin::Hub { url, .. } = origin else { return Level::Allow };
     let access = cfg.hub(url).map(|h| h.access.clone()).unwrap_or_else(|| "ask".into());
     match access.as_str() {
         "full" => Level::Allow,
         "ask" | "edit" if approvals => Level::Ask,
         a => Level::Deny(format!(
-            "computer use needs a `full` link, or `ask` / `edit` with approvals: true (this link is `{a}`; agl connect … --access)"
+            "{what} needs a `full` link, or `ask` / `edit` with approvals: true (this link is `{a}`; agl connect … --access)"
         )),
     }
 }
@@ -247,15 +272,25 @@ struct Helper {
 
 type Slot = Arc<tokio::sync::Mutex<Option<Helper>>>;
 
-/// Helpers per product, and the sessions the person stopped.
+/// Helpers per product, the sessions the person stopped, and the last
+/// screenshot sent per window.
 #[derive(Default)]
 pub struct Computer {
     helpers: tokio::sync::Mutex<HashMap<String, Slot>>,
     stopped: std::sync::Mutex<HashSet<(String, String)>>,
+    /// (hub, session, bundle id, window id) → the last screenshot sent.
+    shots: Shots,
     next: std::sync::atomic::AtomicU64,
 }
 
-fn hub_key(origin: &Origin) -> String {
+/// A helper reply that says a macOS permission is missing (as its error, or
+/// as a warning of a result that went without a screenshot).
+fn mentions_missing_permission(reply: &Value) -> bool {
+    let has = |v: &Value| v.as_str().is_some_and(|s| s.starts_with("permission_missing"));
+    has(&reply["error"]) || reply["result"]["warnings"].as_array().is_some_and(|w| w.iter().any(has))
+}
+
+pub(super) fn hub_key(origin: &Origin) -> String {
     match origin {
         Origin::Hub { url, .. } => url.clone(),
         Origin::Local => String::new(),
@@ -263,11 +298,19 @@ fn hub_key(origin: &Origin) -> String {
 }
 
 fn spawn(app_name: Option<&str>) -> Result<Helper> {
-    let exe = std::env::current_exe().context("locate agl")?;
-    let (program, pre) = crate::app::wrap(&exe, app_name);
+    let (program, pre, post): (std::path::PathBuf, Vec<std::ffi::OsString>, Vec<&str>) = match &crate::brand::get().computer_helper {
+        // A brand's own helper app, responsible for itself.
+        Some(helper) => (helper.clone(), Vec::new(), vec![crate::computer::RESPONSIBLE_ARG]),
+        None => {
+            let exe = std::env::current_exe().context("locate agl")?;
+            let (program, pre) = crate::app::wrap(&exe, app_name);
+            (program, pre, Vec::new())
+        }
+    };
     let mut child = tokio::process::Command::new(program)
         .args(pre)
         .arg(HELPER_ARG)
+        .args(post)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -316,6 +359,12 @@ impl Computer {
                 }
             };
             let v: Value = serde_json::from_str(&reply).context("helper reply")?;
+            // macOS answers a process's permission checks from what it read
+            // when the process started: after a missing permission, the next
+            // request starts a new helper, which sees a grant made meanwhile.
+            if mentions_missing_permission(&v) {
+                *guard = None;
+            }
             if v["ok"] == true {
                 return Ok(v["result"].clone());
             }
@@ -342,7 +391,10 @@ impl Computer {
 
     pub fn reset(&self, origin: &Origin, params: &Value) -> Value {
         let session = params.get("session").and_then(Value::as_str).unwrap_or_default().to_string();
-        self.stopped.lock().unwrap().remove(&(hub_key(origin), session));
+        let hub = hub_key(origin);
+        // The next screenshot of every window is sent again.
+        self.shots.forget(&hub, &session);
+        self.stopped.lock().unwrap().remove(&(hub, session));
         json!({"ok": true})
     }
 
@@ -354,38 +406,74 @@ impl Computer {
             bail!(e);
         }
         let request = params.get("request").and_then(Value::as_bool).unwrap_or(false);
-        let mut r = self.request(app_name(cfg, origin).as_deref(), json!({"op": "permissions", "args": {"request": request}})).await?;
-        r["app_name"] = json!(app_name(cfg, origin).unwrap_or_else(|| "agl".into()));
+        let app = app_name(cfg, origin, params.get("app_name").and_then(Value::as_str))?;
+        let mut r = self.request(app.as_deref(), json!({"op": "permissions", "args": {"request": request}})).await?;
+        r["app_name"] = json!(app.unwrap_or_else(helper_name));
         Ok(r)
+    }
+
+    /// Sends each screenshot of `r` the way the caller asked (images.rs).
+    async fn deliver(&self, origin: &Origin, session: &str, r: &mut Value, upload: Option<&str>) {
+        self.shots.deliver(shot_key(origin, session, r), r, upload).await;
     }
 }
 
-fn app_name(cfg: &Config, origin: &Origin) -> Option<String> {
-    super::link_app(cfg, origin)
+fn shot_key(origin: &Origin, session: &str, r: &Value) -> ShotKey {
+    let bundle = r["app"]["bundle_id"].as_str().unwrap_or_default().to_string();
+    let window = match &r["window"]["id"] {
+        Value::Null => String::new(),
+        v => v.to_string(),
+    };
+    (hub_key(origin), session.to_string(), bundle, window)
+}
+
+/// The product the helper runs under: the link's `app_name`, else the
+/// caller's (`tools.call {app_name}`, agl 0.3.17), else none (agl).
+fn app_name(cfg: &Config, origin: &Origin, asked: Option<&str>) -> Result<Option<String>> {
+    // A brand's own helper serves everything: no product launcher.
+    if crate::brand::get().computer_helper.is_some() {
+        return Ok(None);
+    }
+    if let Some(name) = super::link_app(cfg, origin) {
+        return Ok(Some(name));
+    }
+    match asked {
+        Some(a) => crate::app::validate(a),
+        None => Ok(None),
+    }
+}
+
+/// How a computer tool call is made, besides its arguments.
+#[derive(Default, Clone)]
+pub struct CallOpts {
+    pub approvals: bool,
+    /// The hub's conversation: scopes `allow_session`, state and `unchanged`.
+    pub session: String,
+    /// Return screenshots (`images: true`).
+    pub images: bool,
+    /// The product the helper runs under when the link names none.
+    pub app_name: Option<String>,
+    /// Where to PUT a screenshot instead of returning its bytes.
+    pub image_upload: Option<String>,
 }
 
 /// Options a held call keeps for when it runs.
-fn opts(args: &Value) -> (bool, String) {
+fn opts(args: &Value) -> CallOpts {
     let o = args.get("_agl");
-    (
-        o.and_then(|o| o.get("images")).and_then(Value::as_bool).unwrap_or(false),
-        o.and_then(|o| o.get("session")).and_then(Value::as_str).unwrap_or_default().to_string(),
-    )
+    let s = |k: &str| o.and_then(|o| o.get(k)).and_then(Value::as_str).map(str::to_string);
+    CallOpts {
+        approvals: true,
+        session: s("session").unwrap_or_default(),
+        images: o.and_then(|o| o.get("images")).and_then(Value::as_bool).unwrap_or(false),
+        app_name: s("app_name"),
+        image_upload: s("image_upload"),
+    }
 }
 
 /// `tools.call` for a computer tool.
-#[allow(clippy::too_many_arguments)]
-pub async fn call(
-    runtime: &super::Runtime,
-    cfg: &Config,
-    origin: &Origin,
-    name: &str,
-    mut args: Value,
-    approvals: bool,
-    session: &str,
-    images: bool,
-) -> Result<Value> {
-    let lvl = level(cfg, origin, approvals);
+pub async fn call(runtime: &super::Runtime, cfg: &Config, origin: &Origin, name: &str, mut args: Value, o: CallOpts) -> Result<Value> {
+    let session = o.session.as_str();
+    let lvl = level(cfg, origin, o.approvals);
     if let Level::Deny(e) = &lvl {
         bail!("{e}");
     }
@@ -393,7 +481,9 @@ pub async fn call(
     if c.is_stopped(origin, session) {
         bail!("stopped_by_user: the person stopped computer use in this conversation; wait for them");
     }
-    let app = app_name(cfg, origin);
+    let app = app_name(cfg, origin, o.app_name.as_deref())?;
+    // A bad upload URL is checked when the screenshot is sent: the call
+    // still runs and the screenshot comes inline with a warning.
     if name == "computer_list_apps" {
         let mut r = c.request(app.as_deref(), json!({"op": "list_apps"})).await?;
         if let Some(apps) = r.get_mut("apps").and_then(Value::as_array_mut) {
@@ -415,7 +505,13 @@ pub async fn call(
     }
     // Act on exactly the app that was approved.
     args["app"] = json!(bundle);
-    args["_agl"] = json!({"images": images, "session": session, "title": format!("Use {display} ({bundle})")});
+    args["_agl"] = json!({
+        "images": o.images,
+        "session": session,
+        "title": format!("Use {display} ({bundle})"),
+        "app_name": app,
+        "image_upload": o.image_upload,
+    });
     let scope = format!("computer:{bundle}");
     if lvl == Level::Ask && !runtime.approvals.granted(origin, session, &scope) {
         let title = format!("Use {display} ({bundle})");
@@ -430,7 +526,7 @@ pub async fn approved(runtime: &super::Runtime, cfg: &Config, origin: &Origin, n
     if let Level::Deny(e) = level(cfg, origin, true) {
         bail!(e);
     }
-    let (_, session) = opts(&args);
+    let session = opts(&args).session;
     if runtime.computer.is_stopped(origin, &session) {
         bail!("stopped_by_user: the person stopped computer use in this conversation; wait for them");
     }
@@ -441,41 +537,36 @@ pub async fn approved(runtime: &super::Runtime, cfg: &Config, origin: &Origin, n
 }
 
 async fn run(runtime: &super::Runtime, cfg: &Config, origin: &Origin, name: &str, mut args: Value) -> Result<Value> {
-    let (images, session) = opts(&args);
-    if let Some(o) = args.as_object_mut() {
-        o.remove("_agl");
+    let o = opts(&args);
+    let session = o.session.as_str();
+    if let Some(a) = args.as_object_mut() {
+        a.remove("_agl");
     }
     if name == "computer_open_app" {
         args["bundle_id"] = args["app"].clone();
     }
     let req = json!({"op": "tool", "tool": name, "args": args, "session": format!("{}\u{1}{session}", hub_key(origin))});
-    let mut r = runtime.computer.request(app_name(cfg, origin).as_deref(), req).await?;
-    shape_images(&mut r, images);
+    let app = app_name(cfg, origin, o.app_name.as_deref())?;
+    let mut r = runtime.computer.request(app.as_deref(), req).await?;
+    shape_images(&mut r, o.images);
+    if o.images {
+        runtime.computer.deliver(origin, session, &mut r, o.image_upload.as_deref()).await;
+    }
     Ok(r)
-}
-
-/// Images go back only to callers that asked for them (`images: true`);
-/// others, and images over 4 MB, get `omitted` placeholders.
-pub fn shape_images(r: &mut Value, wanted: bool) {
-    let Some(list) = r.get_mut("images").and_then(Value::as_array_mut) else { return };
-    for img in list {
-        let too_big = img["data"].as_str().is_some_and(|d| d.len() > MAX_IMAGE_B64);
-        if !wanted || too_big {
-            if let Some(o) = img.as_object_mut() {
-                o.remove("data");
-                o.insert("omitted".into(), json!(true));
-            }
-        }
-    }
-    if !wanted {
-        r["images_note"] = json!("pass images: true to tools.call to receive screenshots");
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::approvals::{self, Approvals};
     use super::*;
+
+    #[test]
+    fn a_missing_permission_restarts_the_helper() {
+        assert!(mentions_missing_permission(&json!({"ok": false, "error": "permission_missing: accessibility"})));
+        assert!(mentions_missing_permission(&json!({"ok": true, "result": {"warnings": ["permission_missing: screen_recording. No screenshot"]}})));
+        assert!(!mentions_missing_permission(&json!({"ok": true, "result": {"warnings": ["window is minimized"]}})));
+        assert!(!mentions_missing_permission(&json!({"ok": false, "error": "app_blocked"})));
+    }
 
     #[test]
     fn blocked_apps() {
@@ -490,14 +581,67 @@ mod tests {
         assert!(blocked(&cfg, "com.tinyspeck.slackmacgap"));
     }
 
+    fn shot() -> Value {
+        json!({
+            "app": {"bundle_id": "com.apple.Notes"},
+            "window": {"id": 7},
+            "images": [{"mime_type": "image/jpeg", "data": "aGVsbG8="}],
+        })
+    }
+
+    #[tokio::test]
+    async fn unchanged_is_per_window_and_reset_clears_it() {
+        let c = Computer::default();
+        let o = Origin::Hub { url: "https://h".into(), share_local: true };
+        let mut r = shot();
+        c.deliver(&o, "s", &mut r, None).await;
+        assert_eq!(r["images"][0]["data"], "aGVsbG8=");
+        let mut r = shot();
+        c.deliver(&o, "s", &mut r, None).await;
+        assert_eq!(r["images"][0]["unchanged"], true);
+        // Another window, another session: sent.
+        let mut r = shot();
+        r["window"]["id"] = json!(8);
+        c.deliver(&o, "s", &mut r, None).await;
+        assert!(r["images"][0]["data"].is_string());
+        let mut r = shot();
+        c.deliver(&o, "t", &mut r, None).await;
+        assert!(r["images"][0]["data"].is_string());
+        c.reset(&o, &json!({"session": "s"}));
+        let mut r = shot();
+        c.deliver(&o, "s", &mut r, None).await;
+        assert!(r["images"][0]["data"].is_string());
+    }
+
     #[test]
-    fn images_are_opt_in() {
-        let mut r = json!({"images": [{"mime_type": "image/jpeg", "data": "abcd"}]});
-        shape_images(&mut r, false);
-        assert_eq!(r["images"][0], json!({"mime_type": "image/jpeg", "omitted": true}));
-        let mut r = json!({"images": [{"mime_type": "image/jpeg", "data": "abcd"}]});
-        shape_images(&mut r, true);
-        assert_eq!(r["images"][0]["data"], "abcd");
+    fn app_name_from_the_link_or_the_caller() {
+        let cfg = Config::default();
+        let local = Origin::Local;
+        assert_eq!(app_name(&cfg, &local, None).unwrap(), None);
+        assert_eq!(app_name(&cfg, &local, Some("Acme")).unwrap().as_deref(), Some("Acme"));
+        assert_eq!(app_name(&cfg, &local, Some("agl")).unwrap(), None);
+        assert!(app_name(&cfg, &local, Some("a/b")).is_err());
+        let o = Origin::Hub { url: "https://h".into(), share_local: true };
+        assert_eq!(app_name(&cfg, &o, Some("Acme")).unwrap().as_deref(), Some("Acme"));
+        // The link's own app name wins.
+        let mut cfg = Config::default();
+        let mut link = crate::config::HubLink::new("https://h");
+        link.app_name = Some("Linked".into());
+        cfg.hubs.push(link);
+        assert_eq!(app_name(&cfg, &o, Some("Acme")).unwrap().as_deref(), Some("Linked"));
+        assert_eq!(app_name(&cfg, &o, Some("a/b")).unwrap().as_deref(), Some("Linked"));
+    }
+
+    #[test]
+    fn held_calls_keep_their_options() {
+        let args = json!({"app": "x", "_agl": {"images": true, "session": "s", "app_name": "Acme", "image_upload": "https://u"}});
+        let o = opts(&args);
+        assert!(o.images);
+        assert_eq!(o.session, "s");
+        assert_eq!(o.app_name.as_deref(), Some("Acme"));
+        assert_eq!(o.image_upload.as_deref(), Some("https://u"));
+        let o = opts(&json!({"app": "x", "_agl": {"images": false, "session": "s", "app_name": null, "image_upload": null}}));
+        assert_eq!((o.app_name, o.image_upload), (None, None));
     }
 
     #[test]

@@ -16,7 +16,7 @@ use super::ffi::*;
 use super::keys;
 
 /// Long edge of a screenshot handed to the model.
-const MAX_IMAGE_EDGE: u32 = 1568;
+const MAX_IMAGE_EDGE: u32 = 1280;
 const AX_TIMEOUT_SECS: f32 = 3.0;
 /// Nodes visited per tree, included or not.
 const MAX_VISITED: usize = 20_000;
@@ -611,7 +611,7 @@ fn capture(id: u32) -> Result<(Vec<u8>, u32, u32)> {
         let (w, h) = png_size(&bytes).context("unreadable screenshot")?;
         let jpg = dir.join("w.jpg");
         let mut cmd = std::process::Command::new("/usr/bin/sips");
-        cmd.args(["-s", "format", "jpeg", "-s", "formatOptions", "80"]);
+        cmd.args(["-s", "format", "jpeg", "-s", "formatOptions", "70"]);
         if w.max(h) > MAX_IMAGE_EDGE {
             cmd.args(["-Z", &MAX_IMAGE_EDGE.to_string()]);
         }

@@ -241,8 +241,30 @@ const content = toModelContent(r);
 ```
 
 **Images** come back only with `images: true` on `tools.call` (JPEG, long
-edge at most 1568 px); otherwise they are `{mime_type, omitted: true}`, so
-older hubs don't paste base64 into the model's context.
+edge at most 1280 px, quality 70, from 0.3.17; 1568 px before); otherwise
+they are `{mime_type, omitted: true}`, so older hubs don't paste base64 into
+the model's context.
+
+From 0.3.17:
+
+- **`image_upload: {url}`** (with `images: true`): the daemon PUTs each
+  screenshot's JPEG bytes to that signed URL (`Content-Type: image/jpeg`,
+  30 s, no redirects; HTTPS, or HTTP to this machine) and the image becomes
+  `{mime_type, uploaded: true, bytes}` (`bytes`: the base64 length `data`
+  would have had). Links with a `max_body` move a screenshot in dozens of
+  parts otherwise. A failed upload keeps `data` inline and adds
+  `image_upload_failed: <reason>` to `warnings`. The URL never appears in
+  errors or logs.
+- **Unchanged screenshots**: when a window's screenshot is the same as the
+  last one sent for it in that `session`, the image is
+  `{mime_type, unchanged: true}`, with no data and no upload.
+  `computer.reset {session}` forgets what was sent.
+- **`app_name`**: the product the helper runs under when the link has no
+  app name of its own (links paired by a web flow often have none), so
+  macOS asks for and keeps the permissions under that product. The link's
+  own app name wins. `computer.permissions` takes it too.
+
+`toModelContent` leaves out images without `data`.
 
 **Who may use it.** Local clients and `full` links: everything. `ask` and
 `edit` links: only with `approvals: true`, and the first use of **each app**

@@ -22,8 +22,11 @@ use crate::session::Origin;
 pub mod approvals;
 pub mod computer;
 mod executions;
+mod images;
+pub mod provider;
 mod tools;
 pub use executions::Executions;
+pub use provider::{register_provider, CallContext, ToolDef, ToolProvider};
 pub use tools::names as tool_names;
 
 /// Built-in tools, independent of installed coding agents or model credentials.
@@ -32,6 +35,8 @@ pub struct Runtime {
     pub executions: Executions,
     pub approvals: approvals::Approvals,
     pub computer: computer::Computer,
+    /// The last image sent per session and place, for host-registered tools.
+    provider_shots: images::Shots,
     files: tokio::sync::Mutex<()>,
 }
 
