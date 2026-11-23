@@ -159,6 +159,8 @@ agl::brand::set(Brand {
     blocked_apps: vec!["com.acme.desktop".into()], // computer use never operates these
     product: Some(Product { name: "acme-desktop".into(), version: env!("CARGO_PKG_VERSION").into() }),
     computer_use_default: true,              // links get computer use unless the person turned it off
+    isolated_agents_default: true,           // hub sessions' Claude Code / Codex keep out of the person's history
+    hub_instructions_default: true,          // the product's hub may set `instructions`
 })?;
 ```
 

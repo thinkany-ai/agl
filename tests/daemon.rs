@@ -111,6 +111,41 @@ async fn dispatcher() {
     assert!(listed[0]["instructions"].is_null());
     let saved = std::fs::read_to_string(home.join("sessions.json")).unwrap();
     assert!(saved.contains("be brief"), "kept for restarts");
+    let p = json!({"agent": "claude", "cwd": cwd, "name": "hub-plain"});
+    call(&d, "session.create", p, &hub()).await.unwrap();
+    let saved = std::fs::read_to_string(home.join("sessions.json")).unwrap();
+    assert!(!saved.contains("agent_home"), "a hub's sessions keep the person's agent homes unless the person says");
+    call(&d, "session.close", json!({"session_id": "hub-plain"}), &hub()).await.unwrap();
+
+    // --- A hub the person allows: instructions, own agent homes ------------
+    config["hubs"] = json!([{"url": "https://hub.example", "token": "t", "instructions": true, "isolated_agents": true}]);
+    std::fs::write(home.join("config.json"), config.to_string()).unwrap();
+    call(&d, "env.reload", json!({}), &local).await.unwrap();
+    for field in [json!({"extra_args": ["--x"]}), json!({"ephemeral": true})] {
+        let mut p = json!({"agent": "claude", "cwd": cwd});
+        p.as_object_mut().unwrap().extend(field.as_object().unwrap().clone());
+        let err = call(&d, "session.create", p, &hub()).await.unwrap_err();
+        assert!(err.contains("accepted from local connections only"), "{field}: {err}");
+    }
+    let p = json!({"agent": "claude", "cwd": cwd, "instructions": "be brief", "name": "allowed"});
+    let created = call(&d, "session.create", p, &hub()).await.unwrap();
+    assert!(created["instructions"].is_null() && created["agent_home"].is_null(), "still not shown to a hub: {created}");
+    let p = json!({"agent": "claude", "cwd": cwd, "name": "resumed", "resume": "native-1"});
+    call(&d, "session.create", p, &hub()).await.unwrap();
+    let p = json!({"agent": "claude", "cwd": cwd, "name": "mine"});
+    call(&d, "session.create", p, &local).await.unwrap();
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(home.join("sessions.json")).unwrap()).unwrap();
+    let saved = |name: &str| saved.as_array().unwrap().iter().find(|m| m["name"] == name).unwrap().clone();
+    assert_eq!(saved("allowed")["instructions"], "be brief");
+    assert_eq!(saved("allowed")["agent_home"], json!(home.join("agents").join("claude")));
+    assert!(saved("resumed")["agent_home"].is_null(), "a resumed conversation stays in the person's home");
+    assert!(saved("mine")["agent_home"].is_null(), "local sessions keep the person's homes");
+    for name in ["allowed", "resumed", "mine"] {
+        call(&d, "session.close", json!({"session_id": name}), &local).await.unwrap();
+    }
+    config.as_object_mut().unwrap().remove("hubs");
+    std::fs::write(home.join("config.json"), config.to_string()).unwrap();
+    call(&d, "env.reload", json!({}), &local).await.unwrap();
 
     // --- Local sessions do not exist for hubs ------------------------------
     let p = json!({"agent": "claude", "cwd": cwd, "name": "private", "visibility": "local"});

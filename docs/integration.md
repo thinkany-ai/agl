@@ -25,11 +25,22 @@
 | `blocked_apps` | computer use 始终不操作的 bundle id（例如产品自己的 App） |
 | `product` | 在机器 `hello` 里报告的 `{name, version}` |
 | `computer_use_default` | 链接没有设置 `computer_use` 时，computer use 是否打开；agl 本身为 `false`（用户用 `agl computer-use on` 打开） |
+| `isolated_agents_default` | 链接没有设置 `isolated_agents` 时，hub 新建的 Claude Code / Codex 会话是否使用独立数据目录；agl 本身为 `false`，见下文 |
+| `hub_instructions_default` | 链接没有设置 `instructions` 时，hub 能否设置会话的 `instructions`；agl 本身为 `false` |
 
 - 自己的命令行：`agl::brand::set(..)` 后调用 `agl::app::hold_from_args()` 与 `agl::cli::run()`。
 - App 内常驻：`agl::daemon::spawn_embedded(cfg, opts)` 在调用方的 tokio 运行时里启动 daemon，返回端口与 token；退出前看 `busy()`，再 `shutdown().await`。同一个状态目录同时只能有一个 daemon。
 - 链接管理：`agl::link::connect(url, ConnectOptions { … })`、`agl::link::disconnect(url)`、`agl::link::set_computer_use(url, on)`，效果与 `connect` / `disconnect` / `computer-use` 命令相同。
 - 辅助程序的 `main` 只需要 `std::process::exit(agl::computer::helper_main())`；agl 以 `<helper> __computer --responsible` 启动它，它会先让自己成为“负责进程”再开始服务。
+
+### hub 会话的独立数据目录
+
+Claude Code 和 Codex 把每段对话存在自己的数据目录（`~/.claude`、`~/.codex`）里，用户自己的 App 会列出它们，例如 Codex 桌面版会把 hub 发起的对话显示在用户的对话列表里。链接打开 `isolated_agents` 后，这个 hub **新建**的会话改用 `$AGL_HOME/agents/<agent>`，登录仍然是用户本人的：
+
+- Codex：`CODEX_HOME=<目录>`，其中 `auth.json` 是指向用户 `auth.json` 的符号链接；Codex 刷新令牌时沿链接写回，两边始终是同一份登录。用户的 Codex 把登录存在钥匙串（`cli_auth_credentials_store` 不是 `file`）、使用自定义 `model_provider`、或者没有 `auth.json` 时无法这样共享，会话仍用用户的目录。
+- Claude Code：`CLAUDE_CONFIG_DIR=<目录>`，`CLAUDE_SECURESTORAGE_CONFIG_DIR` 指向用户自己的配置目录（默认 `~/.claude` 时为空），凭据仍从用户的钥匙串条目读取和刷新。这个变量没有写进 Claude Code 的公开文档（2.1.318 验证）。
+
+用户的设置、`AGENTS.md` / `CLAUDE.md`、skills、插件都留在用户自己的目录里，不带进独立目录。会话在创建时决定目录并一直沿用，所以原生对话总能续接；带 `resume` 创建的会话（续接用户目录里的对话）和本地客户端的会话不受影响。
 
 详见 [desktop-app.md](../skills/agl-integration/references/desktop-app.md#embedding-and-branding-agl-0317)。
 

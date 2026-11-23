@@ -18,6 +18,7 @@ mod acp;
 mod claude;
 mod codex;
 mod install;
+pub mod isolation;
 mod oneshot;
 
 use std::collections::HashMap;
@@ -275,6 +276,9 @@ pub struct SpawnSpec {
     /// The product the agent runs for: macOS privacy prompts name it
     /// instead of agl (see `crate::app`).
     pub app_name: Option<String>,
+    /// The agent's own data home, apart from the person's (see
+    /// [`isolation`]); None: the person's.
+    pub agent_home: Option<PathBuf>,
 }
 
 /// A throwaway spec for metadata probes (model lists).
@@ -294,6 +298,7 @@ pub(crate) fn probe_spec(id: &str, protocol: Protocol) -> SpawnSpec {
         ephemeral: false,
         unattended: true,
         app_name: None,
+        agent_home: None,
     }
 }
 
@@ -595,6 +600,11 @@ pub(crate) fn base_command(bin: &std::path::Path, spec: &SpawnSpec) -> tokio::pr
     }
     for (k, v) in &spec.def.env {
         cmd.env(k, v);
+    }
+    if let Some(home) = &spec.agent_home {
+        for (k, v) in isolation::env(spec.def.protocol, home) {
+            cmd.env(k, v);
+        }
     }
     cmd.current_dir(&spec.cwd)
         .stdin(std::process::Stdio::piped())
