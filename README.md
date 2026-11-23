@@ -122,6 +122,7 @@ Other files in `~/.agl/`:
 | File | Contents |
 |---|---|
 | `daemon.json` | Port and local token (mode 0600) |
+| `daemon.lock` | Held by the running daemon: one daemon per home, even when two start at once (released when it exits) |
 | `sessions.json` | Session list |
 | `history/` | Per-session event history (not for sessions created with `history: false`) |
 | `daemon.log` | Daemon log |

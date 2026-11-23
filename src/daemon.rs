@@ -74,6 +74,7 @@ pub async fn run(cfg: Config, opts: DaemonOptions) -> Result<()> {
     // Machine-readable line for sidecar hosts that read our stdout.
     println!("{}", started.info);
     let d = started.daemon.clone();
+    let lock = started.lock;
     let serve = axum::serve(started.listener, started.app).with_graceful_shutdown(async move {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
@@ -84,6 +85,7 @@ pub async fn run(cfg: Config, opts: DaemonOptions) -> Result<()> {
     });
     serve.await?;
     stop(&started.daemon, started.tasks).await;
+    drop(lock);
     Ok(())
 }
 
@@ -94,6 +96,7 @@ pub struct EmbeddedDaemon {
     pub port: u16,
     pub token: String,
     daemon: Arc<Daemon>,
+    lock: HomeLock,
     serve: tokio::task::JoinHandle<()>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -118,6 +121,8 @@ impl EmbeddedDaemon {
         self.daemon.shutdown.notify_one();
         let _ = self.serve.await;
         stop(&self.daemon, self.tasks).await;
+        // The home is free once everything above has ended.
+        drop(self.lock);
     }
 }
 
@@ -140,11 +145,13 @@ pub async fn spawn_embedded(cfg: Config, opts: DaemonOptions) -> Result<Embedded
             eprintln!("{} daemon: {e:#}", crate::brand::get().display_name);
         }
     });
-    Ok(EmbeddedDaemon { port: started.port, token: started.daemon.token.clone(), daemon: started.daemon, serve, tasks: started.tasks })
+    Ok(EmbeddedDaemon { port: started.port, token: started.daemon.token.clone(), daemon: started.daemon, lock: started.lock, serve, tasks: started.tasks })
 }
 
 struct Started {
     daemon: Arc<Daemon>,
+    /// Held while this daemon serves its home ([`HomeLock`]).
+    lock: HomeLock,
     listener: tokio::net::TcpListener,
     app: Router,
     port: u16,
@@ -177,13 +184,19 @@ async fn start(cfg: Config, opts: DaemonOptions) -> Result<Started> {
 }
 
 async fn start_serving(cfg: Config, opts: DaemonOptions, name: &str, explicit_port: bool, port: u16) -> Result<Started> {
-    // One daemon per AGL_HOME.
-    if let Some(pid) = std::fs::read_to_string(config::daemon_file())
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|v| v["pid"].as_u64())
-    {
-        if pid as u32 != std::process::id() && pid_alive(pid as u32) {
+    // One daemon per AGL_HOME. The lock makes it hold when two start at the
+    // same moment (each would read daemon.json before the other wrote it).
+    let lock = match HomeLock::acquire(&config::home(), HOME_LOCK_WAIT).await? {
+        Some(lock) => lock,
+        None => {
+            let pid = running_pid().map(|p| format!(" (pid {p})")).unwrap_or_default();
+            anyhow::bail!("a {name} daemon{pid} is already running for {}", config::home().display());
+        }
+    };
+    // A daemon that predates the lock does not take it: daemon.json still
+    // tells one that is alive.
+    if let Some(pid) = running_pid() {
+        if pid != std::process::id() && pid_alive(pid) {
             anyhow::bail!("a {name} daemon (pid {pid}) is already running for {}", config::home().display());
         }
     }
@@ -265,7 +278,70 @@ async fn start_serving(cfg: Config, opts: DaemonOptions, name: &str, explicit_po
     let info = json!({"pid": std::process::id(), "port": port, "token": daemon.token, "version": VERSION});
     config::write_private(&config::daemon_file(), info.to_string().as_bytes())?;
     eprintln!("{name} daemon {} listening on 127.0.0.1:{port} (home {})", crate::brand::version(), config::home().display());
-    Ok(Started { daemon, listener, app, port, info, tasks })
+    Ok(Started { daemon, lock, listener, app, port, info, tasks })
+}
+
+/// The pid in `daemon.json`, if any.
+fn running_pid() -> Option<u32> {
+    std::fs::read_to_string(config::daemon_file())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v["pid"].as_u64())
+        .map(|p| p as u32)
+}
+
+/// How long a starting daemon waits for the home's lock: a restart (a
+/// service manager starting the new process as the old one ends) overlaps
+/// the old daemon's last moments.
+pub const HOME_LOCK_WAIT: Duration = Duration::from_secs(5);
+
+/// The exclusive lock on `<home>/daemon.lock` a daemon holds while it serves
+/// that home, so a home never has two daemons taking its hubs' requests (a
+/// request the wrong one takes is lost). The system releases it when the
+/// process ends, a crash included, so it never goes stale. Other homes —
+/// other products embedding agl — are not affected.
+pub struct HomeLock {
+    #[cfg(unix)]
+    _file: std::fs::File,
+}
+
+impl HomeLock {
+    /// Takes the lock, waiting up to `wait` for a daemon that is ending.
+    /// None: another daemon still holds it.
+    pub async fn acquire(home: &std::path::Path, wait: Duration) -> Result<Option<HomeLock>> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            std::fs::create_dir_all(home)?;
+            let path = home.join("daemon.lock");
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .with_context(|| format!("open {}", path.display()))?;
+            let deadline = tokio::time::Instant::now() + wait;
+            loop {
+                // SAFETY: flock on a descriptor this function owns.
+                if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                    return Ok(Some(HomeLock { _file: file }));
+                }
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                    return Err(err).with_context(|| format!("lock {}", path.display()));
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (home, wait);
+            Ok(Some(HomeLock {}))
+        }
+    }
 }
 
 /// After the local API stopped: end the links and background tasks, then
