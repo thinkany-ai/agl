@@ -16,10 +16,140 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::config::{Config, HubLink};
+use crate::config::{self, Config, HubLink};
 use crate::daemon::{dispatch, machine_info, Daemon};
 use crate::protocol::WireMsg;
 use crate::session::Origin;
+
+/// How a host links this machine to a hub: [`connect`]. The same choices as
+/// the `connect` command's flags.
+#[derive(Clone, Debug, Default)]
+pub struct ConnectOptions {
+    /// One-time pairing code from the hub (exchanged for a machine token).
+    pub code: Option<String>,
+    /// Long-lived machine (or hub) token, instead of a code.
+    pub token: Option<String>,
+    /// Access for sessions this hub creates without naming one.
+    pub access: Option<String>,
+    /// Do not let this hub see sessions started locally.
+    pub private: bool,
+    /// `ws` or `http`.
+    pub transport: Option<String>,
+    /// The product behind this hub, for macOS privacy prompts (`""` clears).
+    pub app_name: Option<String>,
+    /// Computer use (the screen, macOS) for this hub; None leaves it as it is.
+    pub computer_use: Option<bool>,
+    /// Wait this long for the link to come up (or fail) on a running daemon.
+    pub wait: Option<Duration>,
+}
+
+/// Links this machine to a hub, as the `connect` command does: adds the hub
+/// (or replaces its credentials) in the config of this home and makes a
+/// daemon running there pick it up. With `wait`, returns once the daemon
+/// reports the link connected, and fails on an error or when no daemon runs.
+/// Without a running daemon the link comes up when one starts.
+pub async fn connect(hub_url: &str, opts: ConnectOptions) -> Result<()> {
+    ws_url(hub_url, "")?;
+    let brand = crate::brand::get();
+    if !brand.hub_allowed(hub_url) {
+        return Err(brand.refuse_hub(hub_url));
+    }
+    if opts.code.is_some() == opts.token.is_some() {
+        bail!("pass exactly one of a pairing code or a token");
+    }
+    if let Some(a) = &opts.access {
+        if !crate::session::ACCESS_LEVELS.contains(&a.as_str()) {
+            bail!("access must be one of {}", crate::session::ACCESS_LEVELS.join(", "));
+        }
+    }
+    if let Some(t) = &opts.transport {
+        if !config::TRANSPORTS.contains(&t.as_str()) {
+            bail!("transport must be one of {}", config::TRANSPORTS.join(", "));
+        }
+    }
+    let url = config::normalize_url(hub_url);
+    let mut cfg = Config::load()?;
+    // Adding a hub keeps the others; re-connecting one replaces its credentials.
+    let mut entry = cfg.hub(&url).cloned().unwrap_or_else(|| HubLink::new(&url));
+    entry.token = opts.token;
+    entry.pair_code = opts.code;
+    if let Some(a) = opts.access {
+        entry.access = a;
+    }
+    if opts.private {
+        entry.share_local = false;
+    }
+    if let Some(t) = opts.transport {
+        entry.transport = t;
+    }
+    if let Some(n) = opts.app_name {
+        entry.app_name = crate::app::validate(&n).context("app_name")?;
+    }
+    if opts.computer_use.is_some() {
+        entry.computer_use = opts.computer_use;
+    }
+    cfg.hubs.retain(|h| h.url != url);
+    cfg.hubs.push(entry);
+    cfg.save()?;
+    let running = crate::client::Client::connect_local().await;
+    let Some(wait) = opts.wait else {
+        if let Ok(c) = running {
+            c.call("hub.reload", serde_json::json!({})).await?;
+        }
+        return Ok(());
+    };
+    let c = running.map_err(|_| anyhow::anyhow!("the {} daemon is not running", brand.display_name))?;
+    c.call("hub.reload", serde_json::json!({})).await?;
+    let deadline = tokio::time::Instant::now() + wait;
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let st = c.call("daemon.status", serde_json::json!({})).await?;
+        let hs = st["hubs"]
+            .as_array()
+            .and_then(|h| h.iter().find(|h| h["url"] == url.as_str()))
+            .and_then(|h| h["status"].as_str())
+            .unwrap_or("")
+            .to_string();
+        if hs == "connected" {
+            return Ok(());
+        }
+        if hs.starts_with("error") || hs.starts_with("unauthorized") || hs.starts_with("refused") {
+            bail!("{url}: {hs}");
+        }
+    }
+    bail!("timed out connecting to {url}; check `{} status`", brand.cli_name)
+}
+
+/// Unlinks this machine from a hub, as the `disconnect` command does. False
+/// when it was not linked. A daemon running in this home drops the link.
+/// Turns computer use on or off for a linked hub; a running daemon relinks
+/// it, so the hub's `hello` lists the tools as they now are.
+pub async fn set_computer_use(hub_url: &str, on: bool) -> Result<()> {
+    let url = config::normalize_url(hub_url);
+    let mut cfg = Config::load()?;
+    let Some(entry) = cfg.hubs.iter_mut().find(|h| h.url == url) else { bail!("not linked to {url}") };
+    entry.computer_use = Some(on);
+    cfg.save()?;
+    if let Ok(c) = crate::client::Client::connect_local().await {
+        c.call("hub.reload", serde_json::json!({})).await?;
+    }
+    Ok(())
+}
+
+pub async fn disconnect(hub_url: &str) -> Result<bool> {
+    let url = config::normalize_url(hub_url);
+    let mut cfg = Config::load()?;
+    let before = cfg.hubs.len();
+    cfg.hubs.retain(|h| h.url != url);
+    if cfg.hubs.len() == before {
+        return Ok(false);
+    }
+    cfg.save()?;
+    if let Ok(c) = crate::client::Client::connect_local().await {
+        c.call("hub.reload", serde_json::json!({})).await?;
+    }
+    Ok(true)
+}
 
 pub fn ws_url(hub: &str, path: &str) -> Result<String> {
     let base = hub.trim_end_matches('/');
@@ -39,12 +169,38 @@ pub(crate) fn set_status(d: &Daemon, url: &str, s: impl Into<String>) {
     d.hub_status.lock().unwrap().insert(url.to_string(), s.into());
 }
 
-/// Keep one link task per configured hub.
+/// Keep one link task per configured hub. A hub the brand does not allow
+/// (`allowed_hubs`) stays in the config but is not linked. Returns, with
+/// every link stopped, when the daemon stops.
 pub async fn supervise(d: Arc<Daemon>) {
     let mut running: HashMap<String, (HubLink, tokio::task::JoinHandle<()>)> = HashMap::new();
     let mut changes = d.reload.subscribe();
+    let mut refused: std::collections::HashSet<String> = Default::default();
+    let brand = crate::brand::get();
     loop {
-        let hubs = d.mgr.cfg().hubs;
+        if d.is_stopping() {
+            for (url, (_, task)) in running.drain() {
+                task.abort();
+                d.hub_status.lock().unwrap().remove(&url);
+            }
+            return;
+        }
+        let hubs: Vec<HubLink> = d
+            .mgr
+            .cfg()
+            .hubs
+            .into_iter()
+            .filter(|h| {
+                if brand.hub_allowed(&h.url) {
+                    return true;
+                }
+                set_status(&d, &h.url, "refused: not a hub this build links to");
+                if refused.insert(h.url.clone()) {
+                    eprintln!("hub link {}: not linked ({} links only to its own service)", h.url, brand.display_name);
+                }
+                false
+            })
+            .collect();
         // Stop links that were removed or re-paired.
         running.retain(|url, (link, task)| {
             let keep = hubs.iter().any(|h| h == link);
@@ -77,7 +233,7 @@ async fn run_link(d: Arc<Daemon>, url: String) {
             (Some(t), _) => ("token", t.clone()),
             (None, Some(c)) => ("code", c.clone()),
             _ => {
-                set_status(&d, &url, "unauthorized: no token; run `agl connect` again");
+                set_status(&d, &url, format!("unauthorized: no token; run `{} connect` again", crate::brand::get().cli_name));
                 return;
             }
         };
@@ -97,7 +253,7 @@ async fn run_link(d: Arc<Daemon>, url: String) {
             Err(e) if is_unauthorized(&e, kind == "code") => {
                 // Revoked or expired: retrying cannot help. Wait for `agl connect`.
                 let what = if kind == "code" { "pairing code is invalid or expired" } else { "this machine was revoked" };
-                set_status(&d, &url, format!("unauthorized: {what}; run `agl connect` again"));
+                set_status(&d, &url, format!("unauthorized: {what}; run `{} connect` again", crate::brand::get().cli_name));
                 eprintln!("hub link {url}: unauthorized ({what})");
                 return;
             }
@@ -139,7 +295,7 @@ pub(crate) fn store_token(d: &Daemon, hub: &str, token: String, max_body: Option
     fresh.save()?;
     *d.mgr.cfg.write().unwrap() = fresh;
     eprintln!("hub link {hub}: paired");
-    d.reload.send_modify(|g| *g += 1);
+    d.bump_reload();
     Ok(())
 }
 
@@ -171,7 +327,7 @@ async fn connect_once(d: &Arc<Daemon>, link: &HubLink, kind: &str, secret: &str)
         let Ok(WireMsg::Paired { token }) = serde_json::from_str::<WireMsg>(&text) else { bail!("unexpected pairing reply") };
         return store_token(d, hub, token, None);
     }
-    sink.send(Message::Text(WireMsg::Hello { machine: machine_info(&cfg).await }.to_json().into())).await?;
+    sink.send(Message::Text(WireMsg::Hello { machine: machine_info(&cfg, &crate::session::Origin::Hub { url: hub.to_string(), share_local: false }).await }.to_json().into())).await?;
     set_status(d, hub, "connected");
     eprintln!("hub link {hub}: connected");
 

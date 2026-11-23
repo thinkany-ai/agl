@@ -21,7 +21,7 @@
 
 | | |
 |---|---|
-| **内置本地工具** | 为云端 Agent 循环提供四个可发现工具，无需本地 Agent：分段读取、精确编辑、可取消命令、增量输出和执行 ID 去重。[接入说明](skills/agl-integration/references/local-tools.md) |
+| **内置本地工具** | 为云端 Agent 循环提供可发现的工具，无需本地 Agent：分段读取、精确编辑、可取消命令、增量输出和执行 ID 去重。macOS 上另有 `computer_*` 工具，通过辅助功能在后台操作 App，带截图和按 App 审批；需用户为该链接打开（`agl computer-use on`）。[接入说明](skills/agl-integration/references/local-tools.md) |
 | **一套协议驱动 11+ 种 Agent** | 每个 Agent 都用它最好的第一方接口；还可以通过配置接入任意支持 ACP 的 CLI |
 | **热会话、复用上下文** | 两轮之间进程不退出；被回收或重启后用原生 resume 接上原对话。实测 claude 每轮首字从约 6s 降到约 1s |
 | **复用会话** | 用名字复用（`-s name`）。CLI、桌面 App、网页共用同一批会话，可以互相接着聊；会话历史落盘，带续传游标 |
@@ -78,6 +78,7 @@ agl status | start | stop
 |---|---|---|
 | 桌面 App（Electron / 原生），关掉 App 就不用 | 作为 sidecar 打包：`agl daemon --port 0 --parent-pid <pid>`，使用独立的 `AGL_HOME` | [desktop-app.md](skills/agl-integration/references/desktop-app.md) |
 | Rust 桌面 App（Tauri / GPUI） | 直接链接 `agl` crate，在进程内使用 `Manager` | [desktop-app.md#rust-in-process](skills/agl-integration/references/desktop-app.md#rust-in-process) |
+| 以自己的名义发布 agl 的产品（自己的命令行、App 内常驻 daemon、自己的 computer-use 辅助 App） | 先 `agl::brand::set`，再 `agl::cli::run()` 或 `agl::daemon::spawn_embedded` | [desktop-app.md#embedding-and-branding-agl-0317](skills/agl-integration/references/desktop-app.md#embedding-and-branding-agl-0317) |
 | Web 产品 | 用户执行 `curl …/install.sh?code=… \| sh`，机器主动外连到你的后端 | [web-product.md](skills/agl-integration/references/web-product.md) |
 | 只需要本机已安装 agent 列表的产品 | `agl agents --json`（无需 daemon），或 `agents.list` | [discovery.md](skills/agl-integration/references/discovery.md) |
 | 已有自研运行时 / daemon | 保留你的配对和传输层，只把执行层换成 agl | [existing-runtime.md](skills/agl-integration/references/existing-runtime.md) |

@@ -21,7 +21,7 @@ The design draws on [botiverse/oar](https://github.com/botiverse/oar) and on the
 
 | | |
 |---|---|
-| **Built-in local tools** | Four discoverable tools for cloud agent loops, independent of installed agents. Exact text edits, paged reads, cancellable commands, incremental output and execution-ID deduplication. |
+| **Built-in local tools** | Discoverable tools for cloud agent loops, independent of installed agents. Exact text edits, paged reads, cancellable commands, incremental output and execution-ID deduplication. On macOS, `computer_*` tools operate apps in the background through accessibility, with screenshots and per-app approval, once the person turns it on for a link (`agl computer-use on`). |
 | **One protocol, 11+ agents** | Each agent is driven through its best first-party interface. Any ACP-speaking CLI can be added through config. |
 | **Warm sessions, reused context** | The agent process stays alive between turns. After it is suspended, or after a daemon restart, native resume continues the same conversation. Measured: Claude's time to first token drops from about 6s to about 1s per turn. |
 | **Reusable sessions** | Sessions can be reused by name (`-s name`). The CLI, desktop apps and the web share the same sessions, so one can pick up where another left off. History is persisted, with a resume cursor. |
@@ -81,6 +81,7 @@ How each kind of product uses agl:
 |---|---|---|
 | Desktop app (Electron, native), agents only needed while it's open | Bundle agl as a sidecar: `agl daemon --port 0 --parent-pid <pid>` with its own `AGL_HOME` | [desktop-app.md](skills/agl-integration/references/desktop-app.md) |
 | Rust desktop app (Tauri, GPUI) | Link the `agl` crate and use `Manager` in-process | [desktop-app.md#rust-in-process](skills/agl-integration/references/desktop-app.md#rust-in-process) |
+| Product shipping agl under its own name (own CLI, daemon inside its app, own computer-use helper) | `agl::brand::set`, then `agl::cli::run()` or `agl::daemon::spawn_embedded` | [desktop-app.md#embedding-and-branding-agl-0317](skills/agl-integration/references/desktop-app.md#embedding-and-branding-agl-0317) |
 | Cloud app with its own model / agent loop | Install agl and call `tools.list` / `tools.call`; no agent session or local model key | [local-tools.md](skills/agl-integration/references/local-tools.md) |
 | Web product | The user runs `curl …/install.sh?code=… \| sh`; the machine dials out to your backend | [web-product.md](skills/agl-integration/references/web-product.md) |
 | Any product that only needs the list of installed agents | `agl agents --json` (no daemon), or `agents.list` | [discovery.md](skills/agl-integration/references/discovery.md) |

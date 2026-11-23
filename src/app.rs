@@ -169,7 +169,8 @@ fn ensure_bundle(root: &Path, name: &str) -> Result<PathBuf> {
 
 static CAN_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Run as a launcher when agl was started as one (`__hold` / `__held`):
+/// Run as a launcher when agl was started as one (`__hold` / `__held`), or
+/// as the computer-use helper (`__computer`):
 /// returns the exit code to exit with, or `None` for an ordinary agl run.
 /// Call it before anything else in `main`; an app embedding agl's session
 /// manager does the same to give its sessions' `app_name` effect.
@@ -192,7 +193,16 @@ pub fn hold_from_args() -> Option<i32> {
     if mode == HELD_ARG {
         return Some(hold(&rest));
     }
+    if mode == crate::computer::HELPER_ARG {
+        return Some(crate::computer::helper_main());
+    }
     None
+}
+
+/// Whether this executable handles `__hold` and `__computer` (its `main`
+/// called `hold_from_args` first thing).
+pub fn can_hold() -> bool {
+    CAN_HOLD.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Replace this process with `<self> __held <rest>`, responsible for itself.
@@ -200,6 +210,17 @@ pub fn hold_from_args() -> Option<i32> {
 /// parent, as an agent without `app_name` would be.
 #[cfg(target_os = "macos")]
 fn disclaim_and_reexec(me: &std::ffi::OsStr, rest: &[std::ffi::OsString]) {
+    let argv: Vec<&std::ffi::OsStr> =
+        std::iter::once(me).chain(std::iter::once(std::ffi::OsStr::new(HELD_ARG))).chain(rest.iter().map(|a| a.as_os_str())).collect();
+    reexec_responsible(me, &argv);
+}
+
+/// Replace this process (same pid, stdio and environment) with this
+/// executable run as `argv`, responsible for itself: macOS then attributes
+/// its privacy grants to this executable's own bundle, not to whoever
+/// started it. Returns only if that fails (the process goes on as is).
+#[cfg(target_os = "macos")]
+pub(crate) fn reexec_responsible(me: &std::ffi::OsStr, argv: &[&std::ffi::OsStr]) {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -209,11 +230,12 @@ fn disclaim_and_reexec(me: &std::ffi::OsStr, rest: &[std::ffi::OsString]) {
     // The path of the running executable: argv[0] may be relative.
     let path = std::env::current_exe().map(|p| p.into_os_string()).unwrap_or_else(|_| me.to_owned());
     let Ok(cpath) = CString::new(path.as_bytes()) else { return };
-    let mut argv: Vec<CString> = Vec::with_capacity(rest.len() + 2);
-    for a in std::iter::once(me).chain(std::iter::once(std::ffi::OsStr::new(HELD_ARG))).chain(rest.iter().map(|a| a.as_os_str())) {
+    let mut argv_c: Vec<CString> = Vec::with_capacity(argv.len());
+    for a in argv {
         let Ok(c) = CString::new(a.as_bytes()) else { return };
-        argv.push(c);
+        argv_c.push(c);
     }
+    let argv = argv_c;
     let mut ptrs: Vec<*mut libc::c_char> = argv.iter().map(|c| c.as_ptr() as *mut libc::c_char).collect();
     ptrs.push(std::ptr::null_mut());
     extern "C" {
@@ -231,7 +253,7 @@ fn disclaim_and_reexec(me: &std::ffi::OsStr, rest: &[std::ffi::OsString]) {
         if ok {
             let mut pid: libc::pid_t = 0;
             let rc = libc::posix_spawn(&mut pid, cpath.as_ptr(), std::ptr::null(), &attr, ptrs.as_ptr(), environ);
-            eprintln!("agl {HOLD_ARG}: could not take responsibility (posix_spawn: {rc}); running as is");
+            eprintln!("agl: could not take responsibility (posix_spawn: {rc}); running as is");
         }
         libc::posix_spawnattr_destroy(&mut attr);
     }

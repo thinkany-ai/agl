@@ -178,7 +178,7 @@ pub async fn connect_once(d: &Arc<Daemon>, link: &HubLink, kind: &str, secret: &
     let limit = Arc::new(AtomicUsize::new(link.max_body.map_or(BODY_MAX, |n| n.clamp(BODY_MIN, BODY_MAX))));
     // Subscribe before `hello` so no event falls in between.
     let bus = d.mgr.bus.subscribe();
-    let hello = WireMsg::Hello { machine: machine_info(&cfg).await };
+    let hello = WireMsg::Hello { machine: machine_info(&cfg, &crate::session::Origin::Hub { url: hub.to_string(), share_local: false }).await };
     // In parts too if it must: a machine with many agents says a lot.
     for body in batches(&mut encode(&hello, limit.load(Ordering::Relaxed))?.into(), limit.load(Ordering::Relaxed)) {
         http.post_raw("/machine/send", body, Duration::from_secs(30)).await?;

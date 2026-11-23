@@ -56,6 +56,18 @@ pub struct Config {
     /// Directories searched for agent executables before the login shell's
     /// PATH, and put first on the PATH agents run with (absolute or `~/…`).
     pub extra_paths: Vec<String>,
+    /// Computer use (macOS): apps it may never operate. Only editable here,
+    /// never by a hub.
+    pub computer: ComputerConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ComputerConfig {
+    /// More bundle ids to block (`com.example.app`, or a prefix ending in `*`).
+    pub blocked_apps: Vec<String>,
+    /// Built-in blocked bundle ids to allow after all (e.g. a terminal).
+    pub allowed_blocked_apps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +117,12 @@ pub struct HubLink {
     /// name it instead of agl, unless `session.create` names another.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_name: Option<String>,
+    /// Computer use (macOS) for this hub: its `computer_*` tools. Only the
+    /// person sets it, on this computer (`agl computer-use on|off`, or
+    /// `agl connect --computer-use`); unset: the build's default (off for
+    /// agl).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_use: Option<bool>,
 }
 
 pub const TRANSPORTS: [&str; 2] = ["ws", "http"];
@@ -123,7 +141,7 @@ fn default_true() -> bool {
 
 impl HubLink {
     pub fn new(url: &str) -> HubLink {
-        HubLink { url: normalize_url(url), token: None, pair_code: None, access: default_remote_access(), share_local: true, transport: default_transport(), max_body: None, app_name: None }
+        HubLink { url: normalize_url(url), token: None, pair_code: None, access: default_remote_access(), share_local: true, transport: default_transport(), max_body: None, app_name: None, computer_use: None }
     }
 }
 
@@ -153,15 +171,21 @@ impl Default for Config {
             history_image_limit: 16,
             custom_agents: Vec::new(),
             extra_paths: Vec::new(),
+            computer: ComputerConfig::default(),
         }
     }
 }
 
+/// The state directory: `AGL_HOME`, else the brand's home, else `~/.agl`.
 pub fn home() -> PathBuf {
-    if let Ok(dir) = std::env::var("AGL_HOME") {
+    resolve_home(std::env::var("AGL_HOME").ok(), crate::brand::get().home.clone())
+}
+
+fn resolve_home(env: Option<String>, brand: Option<PathBuf>) -> PathBuf {
+    if let Some(dir) = env {
         return PathBuf::from(dir);
     }
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".agl")
+    brand.unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".agl"))
 }
 
 pub fn config_path() -> PathBuf {
@@ -208,6 +232,11 @@ impl Config {
     pub fn hub(&self, url: &str) -> Option<&HubLink> {
         let url = normalize_url(url);
         self.hubs.iter().find(|h| h.url == url)
+    }
+
+    /// Whether computer use is on for this hub (see `HubLink::computer_use`).
+    pub fn computer_use_on(&self, url: &str) -> bool {
+        self.hub(url).and_then(|h| h.computer_use).unwrap_or(crate::brand::get().computer_use_default)
     }
 
     pub fn load() -> Result<Config> {
@@ -258,6 +287,14 @@ pub fn hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_is_agl_home_then_the_brand_then_dot_agl() {
+        let brand = Some(PathBuf::from("/tmp/product-home"));
+        assert_eq!(resolve_home(Some("/tmp/env".into()), brand.clone()), PathBuf::from("/tmp/env"));
+        assert_eq!(resolve_home(None, brand), PathBuf::from("/tmp/product-home"));
+        assert!(resolve_home(None, None).ends_with(".agl"));
+    }
 
     #[test]
     fn hub_links_default_to_ask_and_share_local() {
