@@ -81,6 +81,34 @@ impl Browser {
         }
     }
 
+    /// Like `call`, but a request the link lost or refused while it
+    /// relinked is sent again (for up to about a minute).
+    async fn call_retrying(&mut self, machine_id: Option<&str>, method: &str, params: Value) -> Value {
+        for _ in 0..40 {
+            self.next += 1;
+            let id = self.next.to_string();
+            let mut req = json!({"type": "request", "id": id, "method": method, "params": params});
+            if let Some(m) = machine_id {
+                req["machine_id"] = json!(m);
+            }
+            self.ws.send(Message::Text(req.to_string().into())).await.unwrap();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while let Ok(Some(Ok(Message::Text(t)))) = tokio::time::timeout_at(deadline, self.ws.next()).await {
+                let v: Value = serde_json::from_str(&t).unwrap();
+                if v["type"] == "event" {
+                    self.events.push(v);
+                } else if v["type"] == "response" && v["id"] == id.as_str() && v["error"].is_null() {
+                    return v["result"].clone();
+                } else if v["type"] == "response" && v["id"] == id.as_str() {
+                    // The machine is offline for a moment.
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    break;
+                }
+            }
+        }
+        panic!("{method}: no answer while the link relinked");
+    }
+
     /// Wait until the machine list shows ours online, or (`online: false`)
     /// offline or gone, as after a revoke.
     async fn machine_online(&mut self, online: bool) -> Value {
@@ -169,10 +197,10 @@ async fn linked_machine_runs_a_turn(transport: &str, max_body: Option<usize>) {
     assert_eq!(tools.as_array().unwrap().len(), 4);
     let out = agl(&machine_home).args(["computer-use", "on"]).output().unwrap();
     assert!(out.status.success(), "computer-use on: {}", String::from_utf8_lossy(&out.stderr));
-    let _ = ui.machine_online(true).await;
     let mut listed = 0;
     for _ in 0..50 {
-        listed = ui.call(Some(MACHINE_ID), "tools.list", json!({})).await.as_array().map_or(0, Vec::len);
+        // The daemon relinks this hub to send a new `hello`.
+        listed = ui.call_retrying(Some(MACHINE_ID), "tools.list", json!({})).await.as_array().map_or(0, Vec::len);
         if listed == if cfg!(target_os = "macos") { 14 } else { 4 } {
             break;
         }
