@@ -203,6 +203,14 @@ pub struct MachineInfo {
     /// (`brand::Product`): hubs can tell which app a machine runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub product: Option<crate::brand::Product>,
+    /// The name the person gave this computer (macOS: System Settings →
+    /// General → About → Name), when it has one apart from `hostname`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computer_name: Option<String>,
+    /// The kind of computer, as its maker names it ("MacBook Pro", "Mac
+    /// mini"), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

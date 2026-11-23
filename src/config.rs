@@ -297,6 +297,41 @@ impl Config {
     }
 }
 
+/// The name the person gave this computer: macOS's ComputerName. Read once.
+pub fn computer_name() -> Option<String> {
+    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        if !cfg!(target_os = "macos") {
+            return None;
+        }
+        let out = std::process::Command::new("/usr/sbin/scutil").args(["--get", "ComputerName"]).output().ok()?;
+        let name = String::from_utf8(out.stdout).ok()?.trim().to_string();
+        (out.status.success() && !name.is_empty()).then_some(name)
+    })
+    .clone()
+}
+
+/// The kind of computer ("MacBook Pro", "Mac mini"): macOS's model name.
+/// Read once (`system_profiler` takes a fraction of a second).
+pub fn model() -> Option<String> {
+    static MODEL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    MODEL
+        .get_or_init(|| {
+            if !cfg!(target_os = "macos") {
+                return None;
+            }
+            let out = std::process::Command::new("/usr/sbin/system_profiler").args(["SPHardwareDataType", "-json"]).output().ok()?;
+            model_from_profile(&String::from_utf8_lossy(&out.stdout))
+        })
+        .clone()
+}
+
+fn model_from_profile(json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let name = v["SPHardwareDataType"][0]["machine_name"].as_str()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 pub fn hostname() -> String {
     std::process::Command::new("hostname")
         .output()
@@ -309,6 +344,15 @@ pub fn hostname() -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn model_name_from_system_profiler() {
+        let json = r#"{"SPHardwareDataType":[{"machine_model":"Mac16,1","machine_name":"MacBook Pro"}]}"#;
+        assert_eq!(model_from_profile(json).as_deref(), Some("MacBook Pro"));
+        assert_eq!(model_from_profile(r#"{"SPHardwareDataType":[{}]}"#), None);
+        assert_eq!(model_from_profile("not json"), None);
+    }
+
     use super::*;
 
     #[test]

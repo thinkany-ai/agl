@@ -521,6 +521,8 @@ pub async fn machine_info(cfg: &Config, origin: &Origin) -> MachineInfo {
         agents: agents::detect(cfg, false).await,
         tools,
         product: crate::brand::get().product.clone(),
+        computer_name: config::computer_name(),
+        model: config::model(),
     }
 }
 
