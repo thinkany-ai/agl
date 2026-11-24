@@ -173,9 +173,14 @@ agl daemon ──stdio JSON──> $AGL_HOME/apps/<app_name>.app/…/agl __hold 
 
 ### 5.2 停止与可见性
 
-- 辅助进程在操作期间，在目标窗口边缘显示一个不抢焦点的 `NSPanel` 浮层："<产品名> 正在使用 <App>"，上面有停止按钮。
-- 全局快捷键（默认 `Esc` 连按两次，可配置）同样表示停止。
-- 停止之后：正在执行的动作中止，这个 `session` 后续所有的 `computer_*` 调用都返回错误 `stopped_by_user`，直到 hub 调用 `computer.reset {session}`。hub 应该在用户发出下一条消息时调用它。
+实现见 `src/computer/ui.rs`（0.3.18）。辅助进程的主线程运行 AppKit（`NSApplication`，Accessory 策略，没有 Dock 图标），请求在另一个线程处理。
+
+- 浮层：每次读屏或操作时，在主屏幕右下角（程序坞上方）显示一个不抢焦点的 `NSPanel`："<产品名> 正在操作 <App> · <这一步>"（这一步如「点击「7」」，元素名取自辅助功能的标题、描述或值；`computer_steps` 每执行一步更新一次，带「第几步/共几步」）（系统首选语言为中文时显示中文，否则英文），带"停止"按钮；最后一次调用后 6 秒自动隐藏。产品名取 `tools.call` 的 `app_name`，没有时取品牌的 `display_name`。
+- 高亮：动作执行前 0.2 秒，在要操作的元素上盖一层半透明蓝框（按坐标时是一个小方块），动作结束后隐藏。点击、输入、滚动、设值、`computer_action`、拖动起点都会高亮。
+- 浮层和蓝框位于所有窗口之上、出现在每个桌面空间，`sharingType = none`，不会出现在截图和录屏里（截图本身也只截目标窗口）。
+- 停止：按下后，浮层显示的这个 `session` 在这一轮（`tools.call` 的 `turn`）里后续的 `computer_*` 调用都由辅助进程直接返回 `stopped_by_user`；带另一个 `turn` 的调用解除停止（用户发了新消息）。hub 不传 `turn` 时，停止持续 10 分钟。辅助进程退出（空闲 10 分钟）后停止状态随之消失。
+- 前台保护：要移动真实指针、发系统级按键或把窗口提到最前（`foreground: true`、拖动）之前，先看用户最近一次键盘、鼠标、触控板输入（`CGEventSourceSecondsSinceLastEventType`，不算辅助进程自己发出的事件）。1.5 秒内没有输入才执行；否则最多等 6 秒，仍有输入就不执行，返回 `person_active`。等待中按停止立即生效。
+- 还没有做：全局快捷键停止；hub 侧的 `computer.stop` / `computer.reset` 仍然可用，和浮层的停止互相独立。
 
 ## 6. 权限与审批
 

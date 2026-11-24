@@ -201,12 +201,12 @@ async fn linked_machine_runs_a_turn(transport: &str, max_body: Option<usize>) {
     for _ in 0..50 {
         // The daemon relinks this hub to send a new `hello`.
         listed = ui.call_retrying(Some(MACHINE_ID), "tools.list", json!({})).await.as_array().map_or(0, Vec::len);
-        if listed == if cfg!(target_os = "macos") { 14 } else { 4 } {
+        if listed == if cfg!(target_os = "macos") { 15 } else { 4 } {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert_eq!(listed, if cfg!(target_os = "macos") { 14 } else { 4 });
+    assert_eq!(listed, if cfg!(target_os = "macos") { 15 } else { 4 });
     let tool_file = machine_home.join("tools.txt");
     ui.call(Some(MACHINE_ID), "tools.call", json!({"name":"write","arguments":{"path":tool_file,"content":"hello tools"}})).await;
     ui.call(Some(MACHINE_ID), "tools.call", json!({"name":"edit","arguments":{"path":tool_file,"old_text":"hello","new_text":"你好"}})).await;

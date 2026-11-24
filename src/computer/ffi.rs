@@ -34,6 +34,8 @@ pub const kCGWindowListExcludeDesktopElements: u32 = 16;
 
 pub const kCGHIDEventTap: u32 = 0;
 pub const kCGEventSourceStateHIDSystemState: i32 = 1;
+/// Any input event (`kCGAnyInputEventType`).
+pub const kCGAnyInputEventType: u32 = !0;
 pub const kCGEventLeftMouseDown: u32 = 1;
 pub const kCGEventLeftMouseUp: u32 = 2;
 pub const kCGEventRightMouseDown: u32 = 3;
@@ -179,6 +181,7 @@ extern "C" {
     pub fn CGEventSetLocation(event: CGEventRef, at: CGPoint);
     pub fn CGEventPost(tap: u32, event: CGEventRef);
     pub fn CGEventPostToPid(pid: i32, event: CGEventRef);
+    pub fn CGEventSourceSecondsSinceLastEventType(state: i32, ty: u32) -> f64;
 }
 
 /// An owned CoreFoundation reference, released on drop.

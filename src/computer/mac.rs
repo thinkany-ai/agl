@@ -170,12 +170,22 @@ fn perform(el: &Cf, action: &str) -> AXError {
 }
 
 fn app_element(pid: i32) -> Cf {
+    app_element_within(pid, AX_TIMEOUT_SECS)
+}
+
+/// An app's element whose questions give up after `seconds`.
+fn app_element_within(pid: i32, seconds: f32) -> Cf {
     // SAFETY: creates a +1 element for pid (valid even if pid is gone).
     let el = Cf(unsafe { AXUIElementCreateApplication(pid) });
     // SAFETY: live element.
-    unsafe { AXUIElementSetMessagingTimeout(el.0, AX_TIMEOUT_SECS) };
+    unsafe { AXUIElementSetMessagingTimeout(el.0, seconds) };
     el
 }
+
+/// Listing asks every running app; one that is busy must not hold the list
+/// for AX_TIMEOUT_SECS per question. Its windows then come from the window
+/// server, without titles.
+const LIST_AX_TIMEOUT_SECS: f32 = 0.25;
 
 fn window_id(el: &Cf) -> Option<u32> {
     let mut id = 0u32;
@@ -306,7 +316,7 @@ pub fn list_apps() -> Result<Value> {
     let apps: Vec<Value> = running_apps()
         .into_iter()
         .map(|a| {
-            let el = app_element(a.pid);
+            let el = app_element_within(a.pid, LIST_AX_TIMEOUT_SECS);
             let focused = attr(&el, "AXFocusedWindow").and_then(|w| window_id(&w));
             let mut windows: Vec<Value> = ax_windows(&el)
                 .iter()
@@ -754,10 +764,51 @@ fn source() -> Cf {
     Cf(unsafe { CGEventSourceCreate(kCGEventSourceStateHIDSystemState) })
 }
 
+/// When this helper last posted an event to the real input stream: the
+/// person's idle time counts those too.
+static OWN_INPUT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+/// The quiet a foreground action waits for, and how long it waits.
+const PERSON_QUIET: f64 = 1.5;
+const PERSON_WAIT: Duration = Duration::from_secs(6);
+
+/// Before an action that takes the real pointer, keyboard or front window:
+/// waits until the person has not touched the keyboard, mouse or trackpad
+/// for PERSON_QUIET seconds (this helper's own events aside), up to
+/// PERSON_WAIT. `stopped` ends the wait when the person presses Stop.
+pub fn wait_for_person(stopped: &dyn Fn() -> bool) -> Result<()> {
+    let deadline = Instant::now() + PERSON_WAIT;
+    loop {
+        if stopped() {
+            bail!("stopped_by_user: the person pressed Stop on their screen");
+        }
+        // SAFETY: a read of the window server's input clock.
+        let idle = unsafe { CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateHIDSystemState, kCGAnyInputEventType) };
+        let own = OWN_INPUT.lock().unwrap().map(|t| t.elapsed().as_secs_f64());
+        if person_quiet(idle, own) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "person_active: the person is using this Mac (keyboard or mouse within the last {PERSON_QUIET}s, for {}s); a foreground action would take their pointer and keyboard, so nothing was done. Do it in the background, try again later, or ask them",
+                PERSON_WAIT.as_secs()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// `idle`: seconds since the last input; `own`: since this helper's last
+/// posted event. The last input was ours when both name the same moment.
+fn person_quiet(idle: f64, own: Option<f64>) -> bool {
+    idle >= PERSON_QUIET || own.is_some_and(|o| (o - idle).abs() < 0.3)
+}
+
 fn post(ev: &Cf, pid: i32, foreground: bool) {
     // SAFETY: live event.
     unsafe {
         if foreground {
+            *OWN_INPUT.lock().unwrap() = Some(Instant::now());
             CGEventPost(kCGHIDEventTap, ev.0)
         } else {
             CGEventPostToPid(pid, ev.0)
@@ -1005,8 +1056,42 @@ fn point_arg(states: &States, t: &Target, v: Option<&Value>, what: &str) -> Resu
     locate(states, t, v).map(|(_, p)| p).with_context(|| format!("`{what}`"))
 }
 
+/// The name an action's element goes by on screen (its title, description or
+/// value), for the indicator (ui.rs); None for a point or a nameless element.
+pub fn target_name(states: &States, t: &Target, args: &Value) -> Option<String> {
+    let n = args.get("element").and_then(Value::as_u64)?;
+    let (el, _) = states.element(t, n).ok()?;
+    ["AXTitle", "AXDescription", "AXValue"]
+        .iter()
+        .filter_map(|a| attr_string(el, a))
+        .map(|s| s.trim().to_string())
+        .find(|s| !s.is_empty())
+        .map(|s| if s.chars().count() > 30 { format!("{}…", s.chars().take(29).collect::<String>()) } else { s })
+}
+
+/// The screen rectangle an action works on, for the outline (ui.rs): the
+/// element's frame, or a small square around a point.
+pub fn target_rect(states: &States, t: &Target, tool: &str, args: &Value) -> Option<CGRect> {
+    let point_rect = |p: CGPoint| CGRect { origin: CGPoint { x: p.x - 14.0, y: p.y - 14.0 }, size: CGSize { width: 28.0, height: 28.0 } };
+    let of = |v: &Value| -> Option<CGRect> {
+        if let Some(n) = v.get("element").and_then(Value::as_u64) {
+            let (el, rect) = states.element(t, n).ok()?;
+            return rect.or_else(|| frame(el));
+        }
+        let (x, y) = (num(v, "x")?, num(v, "y")?);
+        states.to_screen(t, x, y).ok().map(point_rect)
+    };
+    match tool {
+        "computer_click" | "computer_type" | "computer_scroll" | "computer_set_value" | "computer_action" => of(args),
+        "computer_drag" => args.get("from").and_then(of),
+        _ => None,
+    }
+}
+
 /// Runs one action tool. Returns a note on how it was done.
-pub fn act(states: &mut States, t: &Target, tool: &str, args: &Value) -> Result<String> {
+/// `before_foreground` runs before anything takes the real pointer,
+/// keyboard or front window (wait_for_person).
+pub fn act(states: &mut States, t: &Target, tool: &str, args: &Value, before_foreground: &dyn Fn() -> Result<()>) -> Result<String> {
     need_accessibility()?;
     let pid = t.app.pid;
     let fg = flag(args, "foreground");
@@ -1035,6 +1120,7 @@ pub fn act(states: &mut States, t: &Target, tool: &str, args: &Value) -> Result<
                 }
             }
             if fg {
+                before_foreground()?;
                 activate(t, win.as_ref());
             }
             mouse_click(pid, at, button, count, fg)?;
@@ -1070,6 +1156,7 @@ pub fn act(states: &mut States, t: &Target, tool: &str, args: &Value) -> Result<
                 }
             }
             if fg {
+                before_foreground()?;
                 activate(t, win.as_ref());
             }
             type_keys(pid, text, fg);
@@ -1079,6 +1166,7 @@ pub fn act(states: &mut States, t: &Target, tool: &str, args: &Value) -> Result<
             let spec = args.get("keys").and_then(Value::as_str).ok_or_else(|| anyhow!("`keys` is required, e.g. \"cmd+l\""))?;
             let combos = keys::parse(spec)?;
             if fg {
+                before_foreground()?;
                 activate(t, win.as_ref());
             }
             let mut via_menu = Vec::new();
@@ -1120,6 +1208,7 @@ pub fn act(states: &mut States, t: &Target, tool: &str, args: &Value) -> Result<
                 states.state(t).and_then(|s| s.win_rect).map(center).ok_or_else(|| anyhow!("call computer_get_state first"))?
             };
             if fg {
+                before_foreground()?;
                 activate(t, win.as_ref());
             }
             scroll_at(pid, at, direction, amount, fg)?;
@@ -1128,7 +1217,8 @@ pub fn act(states: &mut States, t: &Target, tool: &str, args: &Value) -> Result<
         "computer_drag" => {
             let from = point_arg(states, t, args.get("from"), "from")?;
             let to = point_arg(states, t, args.get("to"), "to")?;
-            activate(t, win.as_ref());
+            before_foreground()?;
+                activate(t, win.as_ref());
             drag(pid, from, to);
             Ok("dragged (foreground: dragging moves the real pointer)".into())
         }
@@ -1187,5 +1277,20 @@ pub fn open_app(bundle_id: &str) -> Result<AppInfo> {
             bail!("{bundle_id} started but shows no window yet; call computer_list_apps again shortly");
         }
         std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[cfg(test)]
+mod person_tests {
+    use super::*;
+
+    #[test]
+    fn the_persons_own_input_holds_a_foreground_action() {
+        assert!(person_quiet(5.0, None));
+        assert!(!person_quiet(0.4, None));
+        // The last input was this helper's own click.
+        assert!(person_quiet(0.4, Some(0.45)));
+        // The person moved the mouse after it.
+        assert!(!person_quiet(0.4, Some(3.0)));
     }
 }

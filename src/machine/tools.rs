@@ -76,6 +76,11 @@ pub async fn call(runtime: &Runtime, cfg: &Config, origin: &Origin, params: Valu
         /// names none (0.3.17).
         #[serde(default)]
         app_name: Option<String>,
+        /// Computer tools: the hub's turn (any opaque string). The person's
+        /// Stop on the screen holds for that turn; a call of another turn
+        /// lifts it (0.3.18).
+        #[serde(default)]
+        turn: Option<String>,
         /// Computer and host tools: PUT images here instead of returning
         /// their bytes (0.3.17).
         #[serde(default)]
@@ -96,6 +101,7 @@ pub async fn call(runtime: &Runtime, cfg: &Config, origin: &Origin, params: Valu
             images: p.images,
             app_name: p.app_name,
             image_upload: p.image_upload.map(|u| u.url),
+            turn: p.turn,
         };
         return computer::call(runtime, cfg, origin, &p.name, p.arguments, opts).await;
     }

@@ -245,6 +245,14 @@ pub fn definitions() -> Vec<(&'static str, String, Value, Vec<&'static str>)> {
             vec!["app", "element", "action"],
         ),
         (
+            "computer_steps",
+            "Run several actions on one window in order, each one a step {tool, args} with tool computer_click, computer_type, computer_key, computer_scroll, computer_set_value or computer_action and that tool's arguments (without app). Element numbers all come from state_id; steps stop at the first that fails. Returns the state after them, with `steps` (what each did) and `step_error` when one failed.".into(),
+            common(json!({
+                "steps": {"type": "array", "minItems": 1, "maxItems": 7, "items": {"type": "object", "properties": {"tool": {"type": "string"}, "args": {"type": "object"}}, "required": ["tool"]}},
+            })),
+            vec!["app", "steps"],
+        ),
+        (
             "computer_open_app",
             "Start or switch to an app (by bundle_id or name, also apps that aren't running) and return its state. The only tool that brings an app to the front by itself.".into(),
             common(json!({})),
@@ -464,6 +472,8 @@ pub struct CallOpts {
     pub app_name: Option<String>,
     /// Where to PUT a screenshot instead of returning its bytes.
     pub image_upload: Option<String>,
+    /// The hub's turn, which a Stop on the screen holds for (`tools.call`).
+    pub turn: Option<String>,
 }
 
 /// Options a held call keeps for when it runs.
@@ -476,6 +486,7 @@ fn opts(args: &Value) -> CallOpts {
         images: o.and_then(|o| o.get("images")).and_then(Value::as_bool).unwrap_or(false),
         app_name: s("app_name"),
         image_upload: s("image_upload"),
+        turn: s("turn"),
     }
 }
 
@@ -520,6 +531,7 @@ pub async fn call(runtime: &super::Runtime, cfg: &Config, origin: &Origin, name:
         "title": format!("Use {display} ({bundle})"),
         "app_name": app,
         "image_upload": o.image_upload,
+        "turn": o.turn,
     });
     let scope = format!("computer:{bundle}");
     if lvl == Level::Ask && !runtime.approvals.granted(origin, session, &scope) {
@@ -554,8 +566,14 @@ async fn run(runtime: &super::Runtime, cfg: &Config, origin: &Origin, name: &str
     if name == "computer_open_app" {
         args["bundle_id"] = args["app"].clone();
     }
-    let req = json!({"op": "tool", "tool": name, "args": args, "session": format!("{}\u{1}{session}", hub_key(origin))});
     let app = app_name(cfg, origin, o.app_name.as_deref())?;
+    // Who the on-screen indicator says is acting, and the turn its Stop
+    // holds for (computer::ui).
+    let operator = app.clone().unwrap_or_else(|| crate::brand::get().display_name.clone());
+    let req = json!({
+        "op": "tool", "tool": name, "args": args, "session": format!("{}\u{1}{session}", hub_key(origin)),
+        "turn": o.turn, "operator": operator,
+    });
     let mut r = runtime.computer.request(app.as_deref(), req).await?;
     shape_images(&mut r, o.images);
     if o.images {

@@ -26,6 +26,16 @@ tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json", "stream"] }
 
+# The computer-use helper's on-screen indicator and outline (computer/ui.rs).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSArray", "NSLocale", "NSObject", "NSGeometry"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std", "objc2-core-foundation", "NSApplication", "NSResponder", "NSRunningApplication", "NSPanel", "NSWindow",
+  "NSView", "NSControl", "NSTextField", "NSButton", "NSColor", "NSFont", "NSScreen", "NSGraphics", "NSParagraphStyle", "NSText",
+] }
+dispatch2 = "0.3"
+
 [profile.release]
 opt-level = 3
 lto = true

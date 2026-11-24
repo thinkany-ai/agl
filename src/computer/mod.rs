@@ -14,6 +14,8 @@ pub mod keys;
 mod ffi;
 #[cfg(target_os = "macos")]
 mod mac;
+#[cfg(target_os = "macos")]
+mod ui;
 
 /// The argument that runs agl as the computer-use helper.
 pub const HELPER_ARG: &str = "__computer";
@@ -33,6 +35,7 @@ pub const TOOLS: &[&str] = &[
     "computer_drag",
     "computer_set_value",
     "computer_action",
+    "computer_steps",
     "computer_open_app",
 ];
 
@@ -79,7 +82,13 @@ mod helper {
     /// Lets the UI settle before reading the state after an action.
     const SETTLE: Duration = Duration::from_millis(350);
 
+    /// AppKit on the main thread for the on-screen indicator (ui.rs); the
+    /// requests on a worker thread.
     pub fn run() -> i32 {
+        super::ui::run(serve)
+    }
+
+    fn serve() -> i32 {
         let (tx, rx) = mpsc::channel::<String>();
         std::thread::spawn(move || {
             for line in std::io::stdin().lock().lines() {
@@ -122,10 +131,100 @@ mod helper {
         mac::find_app(q)?.ok_or_else(|| anyhow!("`{q}` is not running with a window; see computer_list_apps, or start it with computer_open_app"))
     }
 
+    /// Actions `computer_steps` runs, and the most it takes.
+    const STEP_TOOLS: &[&str] = &["computer_click", "computer_type", "computer_key", "computer_scroll", "computer_set_value", "computer_action"];
+    const MAX_STEPS: usize = 7;
+    /// Between two steps: lets the UI take the last one in (a click that opens
+    /// a field, then typing into it), as a round trip to the hub used to.
+    const BETWEEN_STEPS: Duration = Duration::from_millis(100);
+
+    /// `computer_steps {app, state_id, steps: [{tool, args}]}`: actions on one
+    /// window in order, every element number from that state, the window read
+    /// once after the last or after the first that failed.
+    #[allow(clippy::too_many_arguments)]
+    fn steps(
+        states: &mut States,
+        t: &Target,
+        args: &Value,
+        operator: &str,
+        session: &str,
+        turn: Option<&str>,
+        window: Option<u32>,
+        screenshot: bool,
+        max: usize,
+    ) -> Result<Value> {
+        let list = args.get("steps").and_then(Value::as_array).cloned().unwrap_or_default();
+        if list.is_empty() || list.len() > MAX_STEPS {
+            bail!("`steps` takes 1 to {MAX_STEPS} actions");
+        }
+        // Checked before anything runs: a bad step runs none.
+        for (i, s) in list.iter().enumerate() {
+            let tool = s.get("tool").and_then(Value::as_str).unwrap_or_default();
+            if !STEP_TOOLS.contains(&tool) {
+                bail!("step {}: `tool` must be one of {}", i + 1, STEP_TOOLS.join(", "));
+            }
+        }
+        let state_id = args.get("state_id").and_then(Value::as_str);
+        if states.stale(t, state_id) {
+            let mut r = states.snapshot(t, window, screenshot, max)?;
+            r["error"] = json!("stale_state");
+            r["message"] = json!("The state changed since that state_id; no step was run. Here is the current state: choose again.");
+            return Ok(r);
+        }
+        let mut done: Vec<Value> = Vec::new();
+        let mut failed: Option<String> = None;
+        for (i, s) in list.iter().enumerate() {
+            if super::ui::stopped(session, turn) {
+                failed = Some(format!("step {}: stopped_by_user: the person pressed Stop on their screen", i + 1));
+                break;
+            }
+            if i > 0 {
+                std::thread::sleep(BETWEEN_STEPS);
+            }
+            let tool = s["tool"].as_str().unwrap_or_default();
+            let mut step_args = s.get("args").cloned().unwrap_or(json!({}));
+            step_args["app"] = json!(t.app.bundle_id);
+            let name = mac::target_name(states, t, &step_args);
+            let step = super::ui::step_text(tool, name.as_deref(), &step_args).map(|w| format!("{}/{} {w}", i + 1, list.len()));
+            super::ui::busy(operator, &t.app.name, session, turn, step);
+            let outline = mac::target_rect(states, t, tool, &step_args);
+            if let Some(r) = outline {
+                super::ui::mark(r);
+                // The first step shows where the run starts; the next ones
+                // follow quickly, still visible.
+                std::thread::sleep(if i == 0 { super::ui::OUTLINE_LEAD } else { super::ui::OUTLINE_LEAD / 2 });
+            }
+            let before_foreground = || mac::wait_for_person(&|| super::ui::stopped(session, turn));
+            let acted = mac::act(states, t, tool, &step_args, &before_foreground);
+            if outline.is_some() {
+                super::ui::unmark();
+            }
+            match acted {
+                Ok(d) => done.push(json!(d)),
+                Err(e) => {
+                    failed = Some(format!("step {} ({tool}): {e:#}", i + 1));
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(SETTLE);
+        let mut r = states.snapshot(t, window, screenshot, max)?;
+        r["steps"] = json!(done);
+        if let Some(f) = failed {
+            r["step_error"] = json!(f);
+        }
+        Ok(r)
+    }
+
     fn handle(states: &mut States, req: &Value) -> Result<Value> {
         let op = req.get("op").and_then(Value::as_str).unwrap_or_default();
         let args = req.get("args").cloned().unwrap_or(json!({}));
         let session = req.get("session").and_then(Value::as_str).unwrap_or_default();
+        let turn = req.get("turn").and_then(Value::as_str);
+        let operator = req.get("operator").and_then(Value::as_str).unwrap_or("agl");
+        if op == "tool" && super::ui::stopped(session, turn) {
+            bail!("stopped_by_user: the person pressed Stop on their screen; do not use it again in this turn");
+        }
         match op {
             "permissions" => Ok(mac::permissions(args.get("request").and_then(Value::as_bool).unwrap_or(false))),
             "list_apps" => mac::list_apps(),
@@ -151,6 +250,7 @@ mod helper {
                 if tool == "computer_open_app" {
                     let id = args.get("bundle_id").and_then(Value::as_str).ok_or_else(|| anyhow!("missing bundle_id"))?;
                     let app = mac::open_app(id)?;
+                    super::ui::busy(operator, &app.name, session, turn, super::ui::step_text(tool, None, &args));
                     let t = Target { session, app: &app };
                     let mut r = states.snapshot(&t, None, screenshot, max)?;
                     r["done"] = json!(format!("opened {}", app.name));
@@ -158,8 +258,14 @@ mod helper {
                 }
                 let app = app_of(&args)?;
                 let t = Target { session, app: &app };
+                // The step on the indicator, by the name its element has on screen.
+                let name = mac::target_name(states, &t, &args);
+                super::ui::busy(operator, &app.name, session, turn, super::ui::step_text(tool, name.as_deref(), &args));
                 if tool == "computer_get_state" {
                     return states.snapshot(&t, window, screenshot, max);
+                }
+                if tool == "computer_steps" {
+                    return steps(states, &t, &args, operator, session, turn, window, screenshot, max);
                 }
                 // An action against an outdated state would hit the wrong thing.
                 let state_id = args.get("state_id").and_then(Value::as_str);
@@ -169,7 +275,18 @@ mod helper {
                     r["message"] = json!("The state changed since that state_id; nothing was done. Here is the current state: choose again.");
                     return Ok(r);
                 }
-                let done = match mac::act(states, &t, tool, &args) {
+                // What it acts on is outlined a moment first (ui.rs).
+                let outline = mac::target_rect(states, &t, tool, &args);
+                if let Some(r) = outline {
+                    super::ui::mark(r);
+                    std::thread::sleep(super::ui::OUTLINE_LEAD);
+                }
+                let before_foreground = || mac::wait_for_person(&|| super::ui::stopped(session, turn));
+                let acted = mac::act(states, &t, tool, &args, &before_foreground);
+                if outline.is_some() {
+                    super::ui::unmark();
+                }
+                let done = match acted {
                     Ok(d) => d,
                     Err(e) if format!("{e}").starts_with("stale_state") => {
                         let mut r = states.snapshot(&t, window, screenshot, max)?;
