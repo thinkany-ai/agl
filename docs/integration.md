@@ -31,7 +31,7 @@
 - 自己的命令行：`agl::brand::set(..)` 后调用 `agl::app::hold_from_args()` 与 `agl::cli::run()`。
 - App 内常驻：`agl::daemon::spawn_embedded(cfg, opts)` 在调用方的 tokio 运行时里启动 daemon，返回端口与 token；退出前看 `busy()`，再 `shutdown().await`。同一个状态目录同时只能有一个 daemon。
 - 链接管理：`agl::link::connect(url, ConnectOptions { … })`、`agl::link::disconnect(url)`、`agl::link::set_computer_use(url, on)`，效果与 `connect` / `disconnect` / `computer-use` 命令相同。
-- 辅助程序的 `main` 只需要 `std::process::exit(agl::computer::helper_main())`；agl 以 `<helper> __computer --responsible` 启动它，它会先让自己成为“负责进程”再开始服务。
+- 辅助程序的 `main` 只需要 `std::process::exit(agl::computer::helper_main())`；agl 以 `<helper> __computer --responsible` 启动它，它会先让自己成为“负责进程”再开始服务。只有本 home 的 daemon 或同一个可执行文件启动的才会服务，别的进程直接启动会被拒绝（退出码 126）。
 
 ### hub 会话的独立数据目录
 

@@ -748,7 +748,12 @@ impl States {
     fn to_screen(&self, t: &Target, x: f64, y: f64) -> Result<CGPoint> {
         let s = self.state(t).ok_or_else(|| anyhow!("no screenshot of this app yet; call computer_get_state first"))?;
         let (Some(r), Some(scale)) = (s.win_rect, s.scale) else { bail!("coordinates need a screenshot; call computer_get_state with screenshot: true") };
-        Ok(CGPoint { x: r.origin.x + x / scale, y: r.origin.y + y / scale })
+        let (dx, dy) = (x / scale, y / scale);
+        // Only inside the screenshot's window: anything else is another app's.
+        if !(0.0..=r.size.width).contains(&dx) || !(0.0..=r.size.height).contains(&dy) {
+            bail!("({x:.0}, {y:.0}) is outside the window's screenshot");
+        }
+        Ok(CGPoint { x: r.origin.x + dx, y: r.origin.y + dy })
     }
 
     fn window(&self, t: &Target) -> Option<Cf> {
@@ -807,10 +812,70 @@ fn person_quiet(idle: f64, own: Option<f64>) -> bool {
     idle >= PERSON_QUIET || own.is_some_and(|o| (o - idle).abs() < 0.3)
 }
 
+/// Set when a foreground event was held back because the target app was no
+/// longer in front (`act` reports it).
+static FOREGROUND_LOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn pid_of(el: &Cf) -> Option<i32> {
+    let mut pid = 0;
+    // SAFETY: live element.
+    (unsafe { AXUIElementGetPid(el.0, &mut pid) } == kAXErrorSuccess).then_some(pid)
+}
+
+fn system_wide() -> Cf {
+    // SAFETY: +1 element.
+    Cf(unsafe { AXUIElementCreateSystemWide() })
+}
+
+/// The app that has keyboard focus (Spotlight's and other panels' included).
+fn focused_pid() -> Option<i32> {
+    attr(&system_wide(), "AXFocusedApplication").and_then(|a| pid_of(&a))
+}
+
+/// The app whose window is topmost at `at`, at any level (menus, Spotlight,
+/// alerts), leaving out this helper's own outline and panel.
+fn pid_at(at: CGPoint) -> Option<i32> {
+    let me = std::process::id() as i32;
+    // SAFETY: the copied array is owned; dictionary values are borrowed.
+    unsafe {
+        let list = Cf::owned(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, 0))?;
+        items(list.0).into_iter().find_map(|d| {
+            let pid = number(CFDictionaryGetValue(d, kCGWindowOwnerPID))? as i32;
+            if pid == me || number(CFDictionaryGetValue(d, kCGWindowAlpha)).unwrap_or(1.0) <= 0.0 {
+                return None;
+            }
+            let mut r = CGRect::default();
+            let b = CFDictionaryGetValue(d, kCGWindowBounds);
+            if b.is_null() || !CGRectMakeWithDictionaryRepresentation(b, &mut r) {
+                return None;
+            }
+            let inside = at.x >= r.origin.x && at.x < r.origin.x + r.size.width && at.y >= r.origin.y && at.y < r.origin.y + r.size.height;
+            inside.then_some(pid)
+        })
+    }
+}
+
+/// A foreground pointer action may only land on the target app's window:
+/// the real input stream goes to whatever is there (a blocked app, System
+/// Settings, the Stop panel).
+fn own_point(pid: i32, at: CGPoint) -> Result<()> {
+    if pid_at(at) != Some(pid) {
+        bail!("not_target: another window is at ({:.0}, {:.0}); nothing was done", at.x, at.y);
+    }
+    Ok(())
+}
+
 fn post(ev: &Cf, pid: i32, foreground: bool) {
     // SAFETY: live event.
     unsafe {
         if foreground {
+            // The real input stream reaches whatever is in front: once that
+            // is not the target (a shortcut switched apps, Spotlight
+            // opened), nothing more is sent.
+            if FOREGROUND_LOST.load(std::sync::atomic::Ordering::SeqCst) || focused_pid() != Some(pid) {
+                FOREGROUND_LOST.store(true, std::sync::atomic::Ordering::SeqCst);
+                return;
+            }
             *OWN_INPUT.lock().unwrap() = Some(Instant::now());
             CGEventPost(kCGHIDEventTap, ev.0)
         } else {
@@ -839,6 +904,7 @@ fn mouse_click(pid: i32, at: CGPoint, button: &str, count: u32, foreground: bool
     };
     let src = source();
     if foreground {
+        own_point(pid, at)?;
         // SAFETY: +1 event, posted then released.
         let mv = Cf(unsafe { CGEventCreateMouseEvent(src.0, kCGEventMouseMoved, at, 0) });
         post(&mv, pid, true);
@@ -901,6 +967,9 @@ fn scroll_at(pid: i32, at: CGPoint, direction: &str, amount: i32, foreground: bo
         "right" => (0, -n),
         other => bail!("direction must be up, down, left or right, not `{other}`"),
     };
+    if foreground {
+        own_point(pid, at)?;
+    }
     let src = source();
     // SAFETY: +1 event, posted then released.
     unsafe {
@@ -911,7 +980,9 @@ fn scroll_at(pid: i32, at: CGPoint, direction: &str, amount: i32, foreground: bo
     Ok(())
 }
 
-fn drag(pid: i32, from: CGPoint, to: CGPoint) {
+fn drag(pid: i32, from: CGPoint, to: CGPoint) -> Result<()> {
+    own_point(pid, from)?;
+    own_point(pid, to)?;
     let src = source();
     // SAFETY: +1 events, posted then released.
     unsafe {
@@ -930,6 +1001,7 @@ fn drag(pid: i32, from: CGPoint, to: CGPoint) {
         let u = Cf(CGEventCreateMouseEvent(src.0, kCGEventLeftMouseUp, to, 0));
         post(&u, pid, true);
     }
+    Ok(())
 }
 
 /// Selects all text of the app's focused text control.
@@ -1095,6 +1167,29 @@ pub fn target_rect(states: &States, t: &Target, tool: &str, args: &Value) -> Opt
 /// `before_foreground` runs before anything takes the real pointer,
 /// keyboard or front window (wait_for_person).
 pub fn act(states: &mut States, t: &Target, tool: &str, args: &Value, before_foreground: &dyn Fn() -> Result<()>) -> Result<String> {
+    FOREGROUND_LOST.store(false, std::sync::atomic::Ordering::SeqCst);
+    let r = act_inner(states, t, tool, args, before_foreground);
+    if FOREGROUND_LOST.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        bail!("not_target: {} was no longer in front, so the rest of the input was not sent; call computer_get_state", t.app.name);
+    }
+    r
+}
+
+/// Shortcuts the system acts on, whatever app is in front: switching apps,
+/// Spotlight, Force Quit, Spaces.
+fn system_shortcut(c: &keys::Combo) -> bool {
+    const TAB: u16 = 48;
+    const SPACE: u16 = 49;
+    const ESC: u16 = 53;
+    let cmd = c.flags & keys::FLAG_CMD != 0;
+    let ctrl = c.flags & keys::FLAG_CONTROL != 0;
+    (cmd && (c.code == TAB || c.code == SPACE))
+        || (ctrl && c.code == SPACE)
+        || (cmd && c.flags & keys::FLAG_ALT != 0 && c.code == ESC)
+        || (ctrl && (123..=126).contains(&c.code))
+}
+
+fn act_inner(states: &mut States, t: &Target, tool: &str, args: &Value, before_foreground: &dyn Fn() -> Result<()>) -> Result<String> {
     need_accessibility()?;
     let pid = t.app.pid;
     let fg = flag(args, "foreground");
@@ -1169,6 +1264,9 @@ pub fn act(states: &mut States, t: &Target, tool: &str, args: &Value, before_for
             let spec = args.get("keys").and_then(Value::as_str).ok_or_else(|| anyhow!("`keys` is required, e.g. \"cmd+l\""))?;
             let combos = keys::parse(spec)?;
             if fg {
+                if combos.iter().any(system_shortcut) {
+                    bail!("system_shortcut: `{spec}` includes a shortcut the system acts on (switching apps, Spotlight, Force Quit, Spaces); use computer_open_app to change apps");
+                }
                 before_foreground()?;
                 activate(t, win.as_ref());
             }
@@ -1222,7 +1320,7 @@ pub fn act(states: &mut States, t: &Target, tool: &str, args: &Value, before_for
             let to = point_arg(states, t, args.get("to"), "to")?;
             before_foreground()?;
                 activate(t, win.as_ref());
-            drag(pid, from, to);
+            drag(pid, from, to)?;
             Ok("dragged (foreground: dragging moves the real pointer)".into())
         }
         "computer_set_value" => {
@@ -1286,6 +1384,17 @@ pub fn open_app(bundle_id: &str) -> Result<AppInfo> {
 #[cfg(test)]
 mod person_tests {
     use super::*;
+
+    #[test]
+    fn system_shortcuts_are_refused_in_the_foreground() {
+        let sys = |spec: &str| keys::parse(spec).unwrap().iter().any(system_shortcut);
+        for spec in ["cmd+tab", "cmd+space", "ctrl+space", "cmd+alt+escape", "ctrl+left", "ctrl+up", "a cmd+tab b"] {
+            assert!(sys(spec), "{spec}");
+        }
+        for spec in ["cmd+l", "tab", "space", "escape", "shift+tab", "cmd+a", "left", "alt+left"] {
+            assert!(!sys(spec), "{spec}");
+        }
+    }
 
     #[test]
     fn the_persons_own_input_holds_a_foreground_action() {

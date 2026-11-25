@@ -23,7 +23,7 @@ pub const HOLD_ARG: &str = "__hold";
 const HELD_ARG: &str = "__held";
 /// Bump when the launcher's command line or behavior changes: launchers are
 /// rebuilt then (and their privacy grants asked for again).
-const HOLDER_REV: &str = "2";
+const HOLDER_REV: &str = "3";
 pub const MAX_NAME_CHARS: usize = 48;
 
 /// A usable `app_name`: trimmed, at most 48 characters, no control
@@ -183,6 +183,11 @@ pub fn hold_from_args() -> Option<i32> {
     let me = args.next()?;
     let mode = args.next()?;
     let rest: Vec<std::ffi::OsString> = args.collect();
+    #[cfg(target_os = "macos")]
+    if (mode == HOLD_ARG || mode == HELD_ARG || mode == crate::computer::HELPER_ARG) && !caller_may_borrow(&mode, &rest) {
+        eprintln!("agl {}: only agl's daemon starts this", mode.to_string_lossy());
+        return Some(126);
+    }
     if mode == HOLD_ARG {
         if rest.is_empty() {
             eprintln!("agl {HOLD_ARG}: no program");
@@ -200,6 +205,46 @@ pub fn hold_from_args() -> Option<i32> {
         return Some(crate::computer::helper_main());
     }
     None
+}
+
+/// Whether whoever started this process may have it run under this
+/// executable's own privacy grants. `__hold` and `__held` start any program
+/// responsible for itself, and a brand's `__computer --responsible` serves
+/// clicks, typing and screenshots: run by any other process of the person,
+/// they would hand it Accessibility and Screen Recording it was never given.
+/// So the parent must be this home's daemon (`daemon.json`) or this same
+/// executable (an app embedding agl, or a launcher's own re-exec), and never
+/// launchd: `open -a <bundle> --args …` makes a process responsible for
+/// itself. A plain `__computer` stays attributed to its parent, so only
+/// launchd is refused there.
+#[cfg(target_os = "macos")]
+fn caller_may_borrow(mode: &std::ffi::OsStr, rest: &[std::ffi::OsString]) -> bool {
+    // SAFETY: getppid(2) cannot fail.
+    let parent = unsafe { libc::getppid() };
+    if parent <= 1 {
+        return false;
+    }
+    let responsible = mode != crate::computer::HELPER_ARG || rest.iter().any(|a| a == crate::computer::RESPONSIBLE_ARG);
+    if !responsible {
+        return true;
+    }
+    let daemon = std::fs::read(crate::config::daemon_file())
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v["pid"].as_i64());
+    if daemon == Some(parent as i64) {
+        return true;
+    }
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: the buffer is PROC_PIDPATHINFO_MAXSIZE bytes, as proc_pidpath requires.
+    let n = unsafe { libc::proc_pidpath(parent, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    if n <= 0 {
+        return false;
+    }
+    buf.truncate(n as usize);
+    let parent_exe = PathBuf::from(<std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(buf));
+    let same = |p: &Path| std::fs::canonicalize(p).ok();
+    matches!((same(&parent_exe), std::env::current_exe().ok().as_deref().and_then(same)), (Some(a), Some(b)) if a == b)
 }
 
 /// Whether this executable handles `__hold` and `__computer` (its `main`

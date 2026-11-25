@@ -141,6 +141,8 @@ Hub 的二进制分发：Hub 从 `--dist <dir>` 目录提供 `agl-<os>-<arch>` �
 - 本地 daemon 只监听 127.0.0.1，每个连接都要带 `daemon.json` 里的 token。
 - 会改变 agent 运行方式的启动参数（`extra_args`、`instructions`、`ephemeral`）只接受本地连接，hub 不能设置。唯一的例外是 `instructions`：用户在本机允许的 hub 可以设置（链接的 `instructions`）。
 - hub 创建的 Claude Code、Codex、Pi、OMP、OpenCode 会话可以不进入用户自己的历史和 App：打开链接的 `isolated_agents` 后，Claude Code 和 Codex 使用 `$AGL_HOME/agents/` 下独立的数据目录，仍然用用户本人的登录；Pi、OMP、OpenCode 只把会话记录放到那里。
+- Hub 的文件调用（`fs.read`、`fs.write`、`fs.edit`）碰不到 `$AGL_HOME`（各链接的 token、其他 hub 的会话、历史和独立数据目录）；Claude Code 会话的 `instructions` 通过权限为 0600 的文件传入，不放在其他用户也能看到的命令行里。
+- macOS 上以产品自身授权运行的 launcher 模式（`__hold`、`__held`、辅助程序的 `__computer --responsible`）只接受本 home 的 daemon 或同一个可执行文件启动。
 - Hub 的机器 token 服务端只存哈希，可以单独吊销；配对码 10 分钟有效，只能用一次。
 
 ## 许可证

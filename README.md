@@ -145,6 +145,8 @@ Other files in `~/.agl/`:
 - The local daemon listens on 127.0.0.1 only, and every connection must present the token from `daemon.json`.
 - Launch settings that can change how an agent runs (`extra_args`, `instructions`, `ephemeral`) are accepted from local connections only, never from a hub. The one exception is `instructions`, from a hub the person allows on this computer (the link's `instructions`).
 - A hub's Claude Code, Codex, Pi, OMP and OpenCode sessions can keep their conversations out of the person's own history and apps: with the link's `isolated_agents`, Claude Code and Codex run with data homes of their own under `$AGL_HOME/agents/`, signed in with the person's login, and Pi, OMP and OpenCode keep only their sessions there.
+- A hub's file calls (`fs.read`, `fs.write`, `fs.edit`) never reach `$AGL_HOME` (links' tokens, other hubs' sessions, history and isolated agent homes), and a Claude Code session's `instructions` go through a 0600 file, not the command line other users can see.
+- On macOS, the launcher modes that run under a product's own privacy grants (`__hold`, `__held`, a helper's `__computer --responsible`) start only from this home's daemon or the same executable.
 - The hub stores only hashes of machine tokens, and each machine can be revoked individually. Pairing codes are single-use and expire after 10 minutes.
 
 ## License

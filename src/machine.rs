@@ -114,6 +114,38 @@ pub(crate) fn update_only_if_idle(cfg: &Config, origin: &Origin, if_idle: bool) 
     }
 }
 
+/// Whether `path`, symlinks resolved, is in agl's home: its config holds
+/// every link's token, and its sessions, history and isolated agent homes
+/// hold other hubs' instructions and conversations. A path that does not
+/// exist yet is judged by its nearest existing ancestor; one with `..` is
+/// refused (to a hub, it is in the home).
+fn inside(path: &std::path::Path, home: &std::path::Path) -> bool {
+    // `..` through a directory that does not exist cannot be resolved here:
+    // refuse it rather than reason about it.
+    if path.components().any(|c| c == std::path::Component::ParentDir) {
+        return true;
+    }
+    let Ok(home) = std::fs::canonicalize(home) else {
+        return path.starts_with(home);
+    };
+    let mut existing = path;
+    let mut rest = Vec::new();
+    let real = loop {
+        if let Ok(real) = std::fs::canonicalize(existing) {
+            break real;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_owned());
+                existing = parent;
+            }
+            _ => return false,
+        }
+    };
+    let full = rest.iter().rev().fold(real, |p, n| p.join(n));
+    full.starts_with(&home)
+}
+
 /// An absolute path, or one under the home directory (`~/…`).
 fn resolve(path: &str) -> Result<PathBuf> {
     if path.contains('\0') {
@@ -131,6 +163,13 @@ fn resolve(path: &str) -> Result<PathBuf> {
 
 pub async fn dispatch(cfg: &Config, origin: &Origin, method: &str, params: Value) -> Result<Value> {
     allowed(cfg, origin, method)?;
+    if matches!(origin, Origin::Hub { .. }) && method.starts_with("fs.") {
+        if let Some(path) = params.get("path").and_then(Value::as_str) {
+            if inside(&resolve(path)?, &crate::config::home()) {
+                bail!("`{method}`: not shared with hubs (agl's own files, or a path with `..`)");
+            }
+        }
+    }
     match method {
         "fs.read" => read(params).await,
         "fs.write" => write(params).await,
@@ -430,6 +469,23 @@ mod tests {
         assert!(resolve("relative/file").is_err());
         assert!(resolve("/tmp/x").is_ok());
         assert!(resolve("~/x").unwrap().is_absolute());
+    }
+
+    #[test]
+    fn hubs_cannot_reach_agl_home() {
+        let root = std::env::temp_dir().join(format!("agl-home-guard-{}", uuid::Uuid::new_v4().simple()));
+        let dir = &root.as_path();
+        let home = dir.join("home");
+        let inside_home = |p: &std::path::Path| inside(p, &home);
+        std::fs::create_dir_all(dir.join("home/agents")).unwrap();
+        std::os::unix::fs::symlink(dir.join("home"), dir.join("link")).unwrap();
+        assert!(inside_home(&dir.join("home/config.json")));
+        assert!(inside_home(&dir.join("home/agents/claude/new/file")));
+        assert!(inside_home(&dir.join("link/config.json")));
+        assert!(inside_home(&dir.join("other/../home/config.json")));
+        assert!(!inside_home(&dir.join("other/file")));
+        assert!(!inside_home(&dir.join("homework")));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

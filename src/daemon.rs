@@ -70,9 +70,17 @@ pub struct DaemonOptions {
 }
 
 pub async fn run(cfg: Config, opts: DaemonOptions) -> Result<()> {
+    let sidecar = opts.parent_pid.is_some();
     let started = start(cfg, opts).await?;
-    // Machine-readable line for sidecar hosts that read our stdout.
-    println!("{}", started.info);
+    // Machine-readable line for sidecar hosts that read our stdout. Anywhere
+    // else stdout is daemon.log, so the token stays in daemon.json (0600).
+    let mut info = started.info.clone();
+    if !sidecar {
+        if let Some(o) = info.as_object_mut() {
+            o.remove("token");
+        }
+    }
+    println!("{info}");
     let d = started.daemon.clone();
     let lock = started.lock;
     let serve = axum::serve(started.listener, started.app).with_graceful_shutdown(async move {

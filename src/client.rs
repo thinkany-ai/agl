@@ -100,7 +100,7 @@ pub async fn ensure_daemon(_cfg: &Config) -> Result<Client> {
 
 pub fn spawn_detached_daemon() -> Result<()> {
     std::fs::create_dir_all(config::home())?;
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(config::log_path())?;
+    let log = config::open_log()?;
     let exe = std::env::current_exe().context("locate agl executable")?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("daemon")

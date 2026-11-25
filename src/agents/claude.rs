@@ -27,6 +27,55 @@ pub struct ClaudeDriver {
     req_seq: u64,
     /// Pending can_use_tool requests: request_id -> original input.
     pending: Arc<Mutex<HashMap<String, Value>>>,
+    /// The instructions file, removed with the driver.
+    _instructions: Option<PrivateFile>,
+}
+
+/// A 0600 file under `$AGL_HOME/run`, deleted when dropped. A hub's
+/// instructions go to Claude Code through one instead of the command line,
+/// which every local user can read (`ps`).
+struct PrivateFile(std::path::PathBuf);
+
+impl PrivateFile {
+    fn write(name: &str, text: &str) -> Result<Self> {
+        let dir = crate::config::home().join("run");
+        std::fs::create_dir_all(&dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let path = dir.join(name);
+        crate::config::write_private(&path, text.as_bytes())?;
+        Ok(Self(path))
+    }
+}
+
+/// Whether this Claude Code takes `--append-system-prompt-file` (2.1 on; an
+/// older one, or one whose version cannot be read, gets the text itself).
+/// Read once per executable and modification time.
+async fn takes_prompt_file(bin: &Path) -> bool {
+    type Seen = Mutex<HashMap<(std::path::PathBuf, Option<std::time::SystemTime>), bool>>;
+    static SEEN: std::sync::OnceLock<Seen> = std::sync::OnceLock::new();
+    let key = (bin.to_path_buf(), std::fs::metadata(bin).and_then(|m| m.modified()).ok());
+    if let Some(&known) = SEEN.get_or_init(Default::default).lock().unwrap().get(&key) {
+        return known;
+    }
+    let ok = super::version_of(bin).await.is_some_and(|v| at_least_2_1(&v));
+    SEEN.get_or_init(Default::default).lock().unwrap().insert(key, ok);
+    ok
+}
+
+fn at_least_2_1(version: &str) -> bool {
+    let mut parts = version.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).map(|p| p.parse::<u64>().unwrap_or(0));
+    let (major, minor) = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    (major, minor) >= (2, 1)
+}
+
+impl Drop for PrivateFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 impl ClaudeDriver {
@@ -65,9 +114,18 @@ impl ClaudeDriver {
                 id
             }
         };
-        if let Some(text) = &spec.instructions {
-            cmd.args(["--append-system-prompt", text]);
-        }
+        let instructions = match &spec.instructions {
+            Some(text) if takes_prompt_file(bin).await => {
+                let file = PrivateFile::write(&format!("claude-{native_id}.md"), text).context("write the session's instructions")?;
+                cmd.arg("--append-system-prompt-file").arg(&file.0);
+                Some(file)
+            }
+            Some(text) => {
+                cmd.args(["--append-system-prompt", text]);
+                None
+            }
+            None => None,
+        };
         if spec.ephemeral {
             cmd.arg("--no-session-persistence");
         }
@@ -131,7 +189,7 @@ impl ClaudeDriver {
             let reason = tail.lock().unwrap().join("\n");
             let _ = tx.send((gen, DriverMsg::Exited(reason)));
         });
-        let d = ClaudeDriver { child, stdin, req_seq: 0, pending };
+        let d = ClaudeDriver { child, stdin, req_seq: 0, pending, _instructions: instructions };
         // Claude initializes (MCP servers, hooks, settings) lazily on the
         // first input; ask now so a warmed session is really warm.
         d.write(json!({"type": "control_request", "request_id": "agl-init", "request": {"subtype": "initialize", "hooks": null}})).await?;
@@ -333,6 +391,15 @@ pub async fn list_models(bin: &Path) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_file_from_2_1() {
+        assert!(at_least_2_1("2.1.332 (Claude Code)"));
+        assert!(at_least_2_1("3.0.0"));
+        assert!(!at_least_2_1("2.0.76 (Claude Code)"));
+        assert!(!at_least_2_1("1.0.128"));
+        assert!(!at_least_2_1("garbage"));
+    }
 
     #[test]
     fn maps_stream_json() {

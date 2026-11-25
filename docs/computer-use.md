@@ -158,6 +158,7 @@ agl daemon ──stdio JSON──> $AGL_HOME/apps/<app_name>.app/…/agl __hold 
 - **新增方法 `computer.permissions {request?: bool}`**：返回 `{accessibility, screen_recording}`，取值为 `granted | denied | unknown`。`request: true` 时触发系统弹窗，并打开系统设置的对应面板。hub 可以调用它，产品据此在页面上做引导。
 - **权限缺失时**：工具调用返回错误 `permission_missing: accessibility`（或 `screen_recording`），模型和产品都能看懂。
 - **launcher 的签名身份**：launcher 是 ad-hoc 签名的 agl 拷贝，只在 `HOLDER_REV` 变化时重建，所以 agl 升级不会让授权失效。辅助进程的协议变更不应该触发 `HOLDER_REV` 递增。辅助进程由 launcher 以 `__hold` 方式拉起，执行的是 daemon 的 agl 路径，而不是 launcher 自身的拷贝，因此和 launcher 解耦。
+- **谁能拉起 launcher**：`__hold`、`__held` 和品牌辅助程序的 `__computer --responsible` 都以这个 `.app` 自己的授权运行，所以只接受两种父进程：本 home 的 daemon（`daemon.json` 里的 pid），或同一个可执行文件（嵌入 agl 的 App）；父进程是 launchd（`open -a … --args`）时一律拒绝，退出码 126。否则同一用户下的任何程序都能借它拿到辅助功能和屏幕录制。普通的 `__computer` 归属于父进程，只拒绝 launchd。（`HOLDER_REV` 因此升到 3，launcher 会重建一次。）
 
 ### 5.1 后台操作的实现
 
@@ -178,8 +179,9 @@ agl daemon ──stdio JSON──> $AGL_HOME/apps/<app_name>.app/…/agl __hold 
 - 浮层：每次读屏或操作时，在主屏幕右下角（程序坞上方）显示一个不抢焦点的 `NSPanel`："<产品名> 正在操作 <App> · <这一步>"（这一步如「点击「7」」，元素名取自辅助功能的标题、描述或值；`computer_steps` 每执行一步更新一次，带「第几步/共几步」）（系统首选语言为中文时显示中文，否则英文），带"停止"按钮；最后一次调用后 6 秒自动隐藏。产品名取 `tools.call` 的 `app_name`，没有时取品牌的 `display_name`。
 - 高亮：动作执行前 0.2 秒，在要操作的元素上盖一层半透明蓝框（按坐标时是一个小方块），动作结束后隐藏。点击、输入、滚动、设值、`computer_action`、拖动起点都会高亮。
 - 浮层和蓝框位于所有窗口之上、出现在每个桌面空间，`sharingType = none`，不会出现在截图和录屏里（截图本身也只截目标窗口）。
-- 停止：按下后，浮层显示的这个 `session` 在这一轮（`tools.call` 的 `turn`）里后续的 `computer_*` 调用都由辅助进程直接返回 `stopped_by_user`；带另一个 `turn` 的调用解除停止（用户发了新消息）。hub 不传 `turn` 时，停止持续 10 分钟。辅助进程退出（空闲 10 分钟）后停止状态随之消失。
+- 停止：按下后，浮层显示的这个 `session` 在这一轮（`tools.call` 的 `turn`）里后续的 `computer_*` 调用都由辅助进程直接返回 `stopped_by_user`；带另一个 `turn` 的调用解除停止（用户发了新消息）。hub 不传 `turn` 时，停止持续 10 分钟。停止状态存在 `$AGL_HOME/computer-stops.json`（0600），辅助进程重启（权限缺失、超时、空闲退出）后仍然有效。
 - 前台保护：要移动真实指针、发系统级按键或把窗口提到最前（`foreground: true`、拖动）之前，先看用户最近一次键盘、鼠标、触控板输入（`CGEventSourceSecondsSinceLastEventType`，不算辅助进程自己发出的事件）。1.5 秒内没有输入才执行；否则最多等 6 秒，仍有输入就不执行，返回 `person_active`。等待中按停止立即生效。
+- 前台输入只发给目标：每个前台事件发出前确认有键盘焦点的仍是目标 App，否则不再发送，返回 `not_target`（比如快捷键切走了 App、打开了聚焦搜索）。前台点击、滚动、拖动的落点必须是目标 App 的窗口（按窗口列表判断，不算辅助进程自己的浮层），坐标也必须在截图的窗口内。前台模式拒绝系统级快捷键（cmd+tab、cmd+space、ctrl+space、cmd+opt+esc、ctrl+方向键），返回 `system_shortcut`。
 - 还没有做：全局快捷键停止；hub 侧的 `computer.stop` / `computer.reset` 仍然可用，和浮层的停止互相独立。
 
 ## 6. 权限与审批
@@ -203,6 +205,7 @@ agl daemon ──stdio JSON──> $AGL_HOME/apps/<app_name>.app/…/agl __hold 
   - 需要扩展 `approvals.rs`：授权 key 从 `(origin, session, tool)` 改成 `(origin, session, scope)`，现有工具的 scope 就是工具名，computer 的 scope 是 `computer:<bundle_id>`。
 - **默认禁止的 App**：无论什么 access 都不能操作，`computer_list_apps` 中标记为 `blocked: true`，调用返回错误 `app_blocked`。
   - 终端类：Terminal、iTerm2、Ghostty、Warp、WezTerm、Alacritty、kitty（否则等于绕过 `exec` 的审批）；
+  - 能运行脚本或带终端的：脚本编辑器、自动操作、快捷指令、VS Code、Cursor、Windsurf、Zed、JetBrains 系列；
   - 钥匙串访问、1Password、Bitwarden 等密码管理器；
   - 系统设置（防止模型给自己授权）；
   - agl 生成的 `apps/*.app`，以及调用方产品自己的桌面 App（通过 `app_name` 对应的 bundle id 判断）。

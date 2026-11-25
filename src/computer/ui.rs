@@ -7,13 +7,14 @@
 //! AppKit runs on the main thread (`run`); the helper's requests run on a
 //! worker thread and reach the windows through the main queue. Stop marks the
 //! session and turn the panel shows; the helper refuses that turn's further
-//! calls (`stopped`), and a call of another turn lifts it.
+//! calls (`stopped`), and a call of another turn lifts it. Stops are kept in
+//! `$AGL_HOME/computer-stops.json`, so a new helper keeps them.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -34,9 +35,33 @@ pub const OUTLINE_LEAD: Duration = Duration::from_millis(200);
 /// A Stop without a turn to hold for (a hub that sends none) lasts this long.
 const STOP_WITHOUT_TURN: Duration = Duration::from_secs(10 * 60);
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Stop {
     turn: Option<String>,
-    at: Instant,
+    /// Unix seconds: a stop outlives the helper (`stops_file`).
+    at: u64,
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Stops are kept on disk, so a helper started again (after a missing
+/// permission, a timeout or idling out) still refuses a stopped turn.
+fn stops_file() -> std::path::PathBuf {
+    crate::config::home().join("computer-stops.json")
+}
+
+fn load_stops() -> HashMap<String, Stop> {
+    std::fs::read(stops_file()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn save_stops(stops: &HashMap<String, Stop>) {
+    if let Ok(b) = serde_json::to_vec(stops) {
+        if let Err(e) = crate::config::write_private(&stops_file(), &b) {
+            eprintln!("agl computer use: could not keep Stop: {e:#}");
+        }
+    }
 }
 
 /// Sessions the person stopped, and the turn each stop holds for.
@@ -50,14 +75,15 @@ static GENERATION: AtomicU64 = AtomicU64::new(0);
 /// lifts the stop (the person asked again).
 pub fn stopped(session: &str, turn: Option<&str>) -> bool {
     let mut guard = STOPS.lock().unwrap();
-    let stops = guard.get_or_insert_with(HashMap::new);
+    let stops = guard.get_or_insert_with(load_stops);
     let Some(s) = stops.get(session) else { return false };
     let holds = match (&s.turn, turn) {
         (Some(a), Some(b)) => a == b,
-        _ => s.at.elapsed() < STOP_WITHOUT_TURN,
+        _ => now().saturating_sub(s.at) < STOP_WITHOUT_TURN.as_secs(),
     };
     if !holds {
         stops.remove(session);
+        save_stops(stops);
     }
     holds
 }
@@ -65,11 +91,12 @@ pub fn stopped(session: &str, turn: Option<&str>) -> bool {
 fn stop_shown() {
     let Some((session, turn)) = SHOWN.lock().unwrap().clone() else { return };
     let mut guard = STOPS.lock().unwrap();
-    let stops = guard.get_or_insert_with(HashMap::new);
+    let stops = guard.get_or_insert_with(load_stops);
     if stops.len() > 1024 {
         stops.clear();
     }
-    stops.insert(session, Stop { turn, at: Instant::now() });
+    stops.insert(session, Stop { turn, at: now() });
+    save_stops(stops);
 }
 
 /// Runs AppKit on this (the main) thread and `worker` beside it; returns

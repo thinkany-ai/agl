@@ -6,6 +6,9 @@ streamed text deltas."""
 import json
 import sys
 import uuid
+if "--version" in sys.argv:
+    print("2.1.300 (Claude Code)")
+    sys.exit(0)
 
 session = None
 for i, a in enumerate(sys.argv):

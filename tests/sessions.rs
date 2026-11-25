@@ -256,7 +256,12 @@ async fn sessions_end_to_end() {
     let argv = |t: &Turn| serde_json::from_str::<Vec<String>>(&t.text).unwrap();
     let args = argv(&turn(&mgr, &mut rx, &custom.id, "ARGS", "queue", None).await);
     let at = |a: &str| args.iter().position(|x| x == a).unwrap_or_else(|| panic!("{a} missing from {args:?}"));
-    assert_eq!(args[at("--append-system-prompt") + 1], "Answer in French.");
+    // Through a private file, never on the command line (`ps` shows it).
+    let file = std::path::PathBuf::from(&args[at("--append-system-prompt-file") + 1]);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "Answer in French.");
+    #[cfg(unix)]
+    assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&file).unwrap().permissions()) & 0o777, 0o600);
+    assert!(!args.iter().any(|a| a.contains("Answer in French")));
     at("--no-session-persistence");
     assert_eq!(&args[args.len() - 2..], ["--custom-flag", "value with spaces; $(not run)"], "appended last, verbatim");
     // An ephemeral session never resumes: its process restarts afresh.

@@ -134,6 +134,8 @@ pub fn install_unit() -> Result<()> {
     let path_env = std::env::var("PATH").unwrap_or_default();
     let log = config::log_path();
     std::fs::create_dir_all(config::home())?;
+    // launchd would create it world-readable.
+    drop(config::open_log()?);
     std::fs::create_dir_all(path.parent().unwrap())?;
 
     if cfg!(target_os = "macos") {

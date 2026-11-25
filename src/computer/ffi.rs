@@ -148,6 +148,7 @@ extern "C" {
     pub fn AXUIElementSetMessagingTimeout(el: AXUIElementRef, seconds: f32) -> AXError;
     pub fn AXUIElementCopyElementAtPosition(app: AXUIElementRef, x: f32, y: f32, out: *mut AXUIElementRef) -> AXError;
     pub fn AXUIElementGetPid(el: AXUIElementRef, pid: *mut i32) -> AXError;
+    pub fn AXUIElementCreateSystemWide() -> AXUIElementRef;
     pub fn AXValueGetTypeID() -> CFTypeID;
     pub fn AXValueCreate(ty: u32, value: *const c_void) -> CFTypeRef;
     pub fn AXValueGetType(v: CFTypeRef) -> u32;

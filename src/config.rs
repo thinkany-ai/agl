@@ -212,6 +212,19 @@ pub fn log_path() -> PathBuf {
     home().join("daemon.log")
 }
 
+/// `daemon.log` for appending, readable by this user only (also when an
+/// earlier version created it world-readable).
+pub fn open_log() -> Result<std::fs::File> {
+    let mut o = std::fs::OpenOptions::new();
+    o.create(true).append(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    let f = o.open(log_path())?;
+    #[cfg(unix)]
+    f.set_permissions(std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    Ok(f)
+}
+
 /// Written by a running daemon: `{pid, port, token, version}` (0600).
 pub fn daemon_file() -> PathBuf {
     home().join("daemon.json")

@@ -50,6 +50,16 @@ const BLOCKED: &[&str] = &[
     "net.kovidgoyal.kitty",
     "co.zeit.hyper",
     "com.raphaelamorim.rio",
+    // They run scripts and shell commands too.
+    "com.apple.ScriptEditor2",
+    "com.apple.Automator",
+    "com.apple.shortcuts",
+    "com.microsoft.VSCode",
+    "com.microsoft.VSCodeInsiders",
+    "com.todesktop.230313mzl4w4u92",
+    "com.exafunction.windsurf",
+    "dev.zed.Zed",
+    "com.jetbrains.*",
     // Secrets.
     "com.apple.keychainaccess",
     "com.apple.Passwords",

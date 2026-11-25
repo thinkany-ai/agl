@@ -247,7 +247,8 @@ async fn linked_machine_runs_a_turn(transport: &str, max_body: Option<usize>) {
 
     // Files and commands on the machine; over a small body limit the file
     // comes back in parts.
-    let dir = machine_home.join("files");
+    // Outside agl's home: hubs never reach that (its config holds the links' tokens).
+    let dir = temp_home("files");
     let content = "0123456789abcdef".repeat(2500);
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &content);
     let path = dir.join("big.txt").display().to_string();
