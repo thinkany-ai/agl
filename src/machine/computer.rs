@@ -300,11 +300,15 @@ pub struct Computer {
     next: std::sync::atomic::AtomicU64,
 }
 
-/// A helper reply that says a macOS permission is missing (as its error, or
-/// as a warning of a result that went without a screenshot).
+/// A helper reply that says a macOS permission is missing (as its error, as
+/// a warning of a result that went without a screenshot, or as a
+/// `permissions` result with one not granted).
 fn mentions_missing_permission(reply: &Value) -> bool {
     let has = |v: &Value| v.as_str().is_some_and(|s| s.starts_with("permission_missing"));
-    has(&reply["error"]) || reply["result"]["warnings"].as_array().is_some_and(|w| w.iter().any(has))
+    let result = &reply["result"];
+    has(&reply["error"])
+        || result["warnings"].as_array().is_some_and(|w| w.iter().any(has))
+        || ["accessibility", "screen_recording"].iter().any(|k| result[*k] == "denied")
 }
 
 pub(super) fn hub_key(origin: &Origin) -> String {
@@ -614,6 +618,10 @@ mod tests {
         assert!(mentions_missing_permission(&json!({"ok": true, "result": {"warnings": ["permission_missing: screen_recording. No screenshot"]}})));
         assert!(!mentions_missing_permission(&json!({"ok": true, "result": {"warnings": ["window is minimized"]}})));
         assert!(!mentions_missing_permission(&json!({"ok": false, "error": "app_blocked"})));
+        // A status check that finds one missing: the next check runs in a
+        // new helper, so a grant made meanwhile shows.
+        assert!(mentions_missing_permission(&json!({"ok": true, "result": {"accessibility": "granted", "screen_recording": "denied"}})));
+        assert!(!mentions_missing_permission(&json!({"ok": true, "result": {"accessibility": "granted", "screen_recording": "granted"}})));
     }
 
     #[test]

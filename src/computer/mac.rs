@@ -53,7 +53,10 @@ pub fn screen_recording(request: bool) -> bool {
 
 pub fn permissions(request: bool) -> Value {
     let ax = accessibility(request);
-    let sr = screen_recording(request);
+    // One at a time: a Screen Recording request made while the Accessibility
+    // prompt is up can be lost, and macOS asks for it only once. Asked after
+    // Accessibility is granted, it adds this app to the Screen Recording list.
+    let sr = screen_recording(request && ax);
     if request {
         let pane = if !ax {
             Some("Privacy_Accessibility")
