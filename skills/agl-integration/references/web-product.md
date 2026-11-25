@@ -129,11 +129,14 @@ several pods:
 
 ## 5. Security checklist
 
-- Sessions your hub creates without `access` default to `ask`: every risky
-  tool call becomes a `permission_request`, so build the approval UI first.
-  Pass `access: "full"` only when the user opted into it, and say so in your
-  UI. The machine owner can change the link's default with
-  `agl connect <url> --code … --access edit|full|read_only`.
+- Sessions your hub creates without `access` get the link's access (`ask`
+  unless the owner chose otherwise); under `ask` every risky tool call
+  becomes a `permission_request`, so build the approval UI first. You may
+  name less than the link's access, never more: `access: "full"` is refused
+  unless the link itself is `full`. The link's access is a ceiling the
+  machine owner sets on the computer (`agl connect <url> --code … --access edit|full|read_only`);
+  requests for more are refused, so send a person who wants more to run that
+  command rather than retrying with higher `access`.
 - Machine tokens:
   - one per machine, hashed at rest, revocable;
   - check ownership on every request (user ↔ machine_id);

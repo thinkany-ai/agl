@@ -81,6 +81,26 @@ impl Browser {
         }
     }
 
+    /// Like `call`, for a request the machine must refuse: its error.
+    async fn call_err(&mut self, machine_id: Option<&str>, method: &str, params: Value) -> String {
+        self.next += 1;
+        let id = self.next.to_string();
+        let mut req = json!({"type": "request", "id": id, "method": method, "params": params});
+        if let Some(m) = machine_id {
+            req["machine_id"] = json!(m);
+        }
+        self.ws.send(Message::Text(req.to_string().into())).await.unwrap();
+        loop {
+            let v = self.recv().await;
+            if v["type"] == "event" {
+                self.events.push(v);
+            } else if v["type"] == "response" && v["id"] == id.as_str() {
+                assert!(!v["error"].is_null(), "{method} was not refused: {}", v["result"]);
+                return v["error"].as_str().unwrap_or_default().to_string();
+            }
+        }
+    }
+
     /// Like `call`, but a request the link lost or refused while it
     /// relinked is sent again (for up to about a minute).
     async fn call_retrying(&mut self, machine_id: Option<&str>, method: &str, params: Value) -> Value {
@@ -142,7 +162,9 @@ impl Browser {
     }
 }
 
-async fn linked_machine_runs_a_turn(transport: &str, max_body: Option<usize>) {
+/// A real hub and a real daemon in their own homes, with the scripted `mock`
+/// agent, paired over `transport` at the link's `access`.
+async fn linked(transport: &str, max_body: Option<usize>, access: &str) -> (Procs, Browser, String, PathBuf) {
     let hub_home = temp_home("hub");
     let machine_home = temp_home("machine");
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mock_acp.py");
@@ -168,7 +190,7 @@ async fn linked_machine_runs_a_turn(transport: &str, max_body: Option<usize>) {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let _procs = Procs { hub, machine_home: machine_home.clone() };
+    let procs = Procs { hub, machine_home: machine_home.clone() };
     let ui_url = format!("ws://127.0.0.1:{port}/ws/ui?token={ADMIN}");
     let mut ws = None;
     for _ in 0..100 {
@@ -183,12 +205,17 @@ async fn linked_machine_runs_a_turn(transport: &str, max_body: Option<usize>) {
     // Pair with a one-time code.
     let code = ui.call(None, "pairing.create", json!({})).await["code"].as_str().unwrap().to_string();
     let out = agl(&machine_home)
-        .args(["connect", &format!("http://127.0.0.1:{port}"), "--code", &code, "--transport", transport, "--access", "full"])
+        .args(["connect", &format!("http://127.0.0.1:{port}"), "--code", &code, "--transport", transport, "--access", access])
         .output()
         .unwrap();
     assert!(out.status.success(), "connect: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     let machine = ui.machine_online(true).await;
     assert_eq!(machine["transport"], transport);
+    (procs, ui, ui_url, machine_home)
+}
+
+async fn linked_machine_runs_a_turn(transport: &str, max_body: Option<usize>) {
+    let (_procs, mut ui, ui_url, machine_home) = linked(transport, max_body, "full").await;
 
     // Built-in tools use the same two transports and need no agent session.
     let tools = ui.call(Some(MACHINE_ID), "tools.list", json!({})).await;
@@ -290,4 +317,81 @@ async fn http_link() {
 #[tokio::test]
 async fn http_link_with_small_body_limit() {
     linked_machine_runs_a_turn("http", Some(6 * 1024)).await;
+}
+
+/// The link's access, set on the computer, is a ceiling a hub cannot get
+/// past: not by naming more access, not by reconfiguring a session, and not
+/// by driving a session of the person's own that runs above it.
+#[tokio::test]
+async fn a_hub_cannot_exceed_its_links_access() {
+    let (_procs, mut ui, _, machine_home) = linked("ws", None, "ask").await;
+    let m = Some(MACHINE_ID);
+    let cwd = std::env::temp_dir();
+
+    let e = ui.call_err(m, "session.create", json!({"agent": "mock", "cwd": cwd, "access": "full"})).await;
+    assert!(e.contains("above this link's `ask`"), "{e}");
+
+    // Without `access` a session gets the link's; asking for less is fine.
+    let meta = ui.call(m, "session.create", json!({"agent": "mock", "cwd": cwd})).await;
+    assert_eq!(meta["access"], "ask");
+    let sid = meta["id"].as_str().unwrap().to_string();
+    let e = ui.call_err(m, "session.configure", json!({"session_id": sid, "access": "edit"})).await;
+    assert!(e.contains("above this link's `ask`"), "{e}");
+    let lowered = ui.call(m, "session.configure", json!({"session_id": sid, "access": "read_only"})).await;
+    assert_eq!(lowered["access"], "read_only");
+    ui.call(m, "session.prompt", json!({"session_id": sid, "text": "hello"})).await;
+    ui.turn_events(&sid).await;
+
+    // The person's own session, at full access, is visible to the hub
+    // (share_local) but cannot be driven by it.
+    let out = agl(&machine_home).args(["run", "mock", "-s", "mine", "--access", "full", "--cwd"]).arg(&cwd).arg("hello").output().unwrap();
+    assert!(out.status.success(), "local run: {}", String::from_utf8_lossy(&out.stderr));
+    let sessions = ui.call(m, "session.list", json!({})).await;
+    let mine = sessions.as_array().unwrap().iter().find(|s| s["name"] == "mine").expect("local session listed").clone();
+    let mine_id = mine["id"].as_str().unwrap();
+    assert_eq!(mine["access"], "full");
+    for (method, params) in [
+        ("session.prompt", json!({"session_id": mine_id, "text": "hello"})),
+        ("session.warm", json!({"session_id": mine_id})),
+        ("session.configure", json!({"session_id": mine_id, "model": "other"})),
+        ("session.approve", json!({"session_id": mine_id, "request_id": "r1", "decision": "allow"})),
+    ] {
+        let e = ui.call_err(m, method, params).await;
+        assert!(e.contains("above this link's `ask`"), "{method}: {e}");
+    }
+    // Reusing it by name is the same session, at the same access.
+    let e = ui.call_err(m, "session.create", json!({"agent": "mock", "cwd": cwd, "name": "mine", "access": "ask", "warm": true})).await;
+    assert!(e.contains("above this link's `ask`"), "{e}");
+    // Denying, in any spelling, is never held back by the ceiling.
+    let e = ui.call_err(m, "session.approve", json!({"session_id": mine_id, "request_id": "r1", "decision": "reject"})).await;
+    assert!(!e.contains("above this link"), "{e}");
+
+    // While a turn of it runs, its access cannot be brought down: that turn,
+    // and anything steered or queued into it, would keep running at `full`.
+    let mut slow = agl(&machine_home).args(["send", "mine", "SLOW"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    for _ in 0..100 {
+        let s = ui.call(m, "session.get", json!({"session_id": mine_id})).await;
+        if s["status"] == "running" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let e = ui.call_err(m, "session.configure", json!({"session_id": mine_id, "access": "ask"})).await;
+    assert!(e.contains("is busy"), "{e}");
+    let out = agl(&machine_home).args(["abort", "mine"]).output().unwrap();
+    assert!(out.status.success(), "abort: {}", String::from_utf8_lossy(&out.stderr));
+    let _ = slow.wait();
+    for _ in 0..100 {
+        let s = ui.call(m, "session.get", json!({"session_id": mine_id})).await;
+        if s["status"] != "running" && s["queued"] == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Idle, it can be brought down to the ceiling, and then it can be driven.
+    let lowered = ui.call(m, "session.configure", json!({"session_id": mine_id, "access": "ask"})).await;
+    assert_eq!(lowered["access"], "ask");
+    ui.call(m, "session.prompt", json!({"session_id": mine_id, "text": "hello again"})).await;
+    ui.turn_events(mine_id).await;
 }
