@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-一个 Rust 单文件二进制（约 4MB），用来操作本地资源、驱动本机的编码 Agent：Claude Code、Codex、Gemini、Antigravity、Kimi、OpenCode、Grok、Cursor 等。它提供：
+一个 Rust 单文件二进制（约 4MB），用来操作本地资源、驱动本机的编码 Agent：Claude Code、Codex、Gemini、Antigravity、Kiro、Kimi、OpenCode、Grok、Cursor 等。它提供：
 
 - 云端应用可通过内置的 `read/write/edit/exec` 四个工具操作本地资源，无需安装其他 Agent；模型调用和任务循环由应用自己负责，写文件和执行命令可以逐次征求用户同意；
 - 常驻热会话、并发与排队、审批、运行中插话（steer）、中断、模型列表、自动垃圾回收；
@@ -140,7 +140,7 @@ Hub 的二进制分发：Hub 从 `--dist <dir>` 目录提供 `agl-<os>-<arch>` �
 - `full` 等于让 Agent 以你的身份执行任意命令。Hub 创建的会话默认 `ask`（可用 `agl connect … --access` 按连接修改），远程使用时 Agent 执行有风险的操作前都会先询问。
 - 本地 daemon 只监听 127.0.0.1，每个连接都要带 `daemon.json` 里的 token。
 - 会改变 agent 运行方式的启动参数（`extra_args`、`instructions`、`ephemeral`）只接受本地连接，hub 不能设置。唯一的例外是 `instructions`：用户在本机允许的 hub 可以设置（链接的 `instructions`）。
-- hub 创建的 Claude Code、Codex、Pi、OMP、OpenCode、Antigravity 会话可以不进入用户自己的历史和 App：打开链接的 `isolated_agents` 后，Claude Code 和 Codex 使用 `$AGL_HOME/agents/` 下独立的数据目录，仍然用用户本人的登录；Pi、OMP、OpenCode、Antigravity 只把会话记录放到那里。
+- hub 创建的 Claude Code、Codex、Pi、OMP、OpenCode、Antigravity、Kiro 会话可以不进入用户自己的历史和 App：打开链接的 `isolated_agents` 后，Claude Code 和 Codex 使用 `$AGL_HOME/agents/` 下独立的数据目录，仍然用用户本人的登录；Pi、OMP、OpenCode、Antigravity、Kiro 只把会话记录放到那里（Kiro 的目录会链接回用户自己的设置、agents 和 steering）。
 - Hub 的文件调用（`fs.read`、`fs.write`、`fs.edit`）碰不到 `$AGL_HOME`（各链接的 token、其他 hub 的会话、历史和独立数据目录）；Claude Code 会话的 `instructions` 通过权限为 0600 的文件传入，不放在其他用户也能看到的命令行里。
 - macOS 上以产品自身授权运行的 launcher 模式（`__hold`、`__held`、辅助程序的 `__computer --responsible`）只接受本 home 的 daemon 或同一个可执行文件启动。
 - Hub 的机器 token 服务端只存哈希，可以单独吊销；配对码 10 分钟有效，只能用一次。

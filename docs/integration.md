@@ -41,6 +41,8 @@ Claude Code 和 Codex 把每段对话存在自己的数据目录（`~/.claude`�
 - Claude Code：`CLAUDE_CONFIG_DIR=<目录>`，`CLAUDE_SECURESTORAGE_CONFIG_DIR` 指向用户自己的配置目录（默认 `~/.claude` 时为空），凭据仍从用户的钥匙串条目读取和刷新。这个变量没有写进 Claude Code 的公开文档（2.1.318 验证）。
 
 - Pi、OMP、OpenCode（0.3.18 起）：只挪会话记录，登录和设置不动。Pi 用 `PI_CODING_AGENT_SESSION_DIR=<目录>/sessions`，OMP 用 `omp acp --session-dir <目录>/sessions`，OpenCode 用 `OPENCODE_DB=<目录>/opencode.db`（它的会话库；`snapshot/`、`tool-output/` 仍在用户的数据目录）。
+- Antigravity（0.3.19 起）：`agy acp --app-data-dir <相对 ~/.gemini 的路径>`，那里只放对话，登录和设置不动。
+- Kiro CLI（0.3.20 起）：`KIRO_HOME=<目录>`，用户 `~/.kiro` 里除会话和日志（`sessions`、`session-index`、`session-leases`、`session-relationships`、`logs`）外的条目都以符号链接放进去，设置、agents、steering、权限预设仍是用户的；登录不在 `~/.kiro` 里，不受影响。
 - 其他 agent 仍用用户的目录：挪数据目录会把登录一起挪走，而 Kimi、Hermes 等刷新凭据时先写临时文件再改名，会把符号链接替换成副本，两边的单次刷新令牌会互相作废。
 
 用户的设置、`AGENTS.md` / `CLAUDE.md`、skills、插件都留在用户自己的目录里，不带进独立目录。会话在创建时决定目录并一直沿用，所以原生对话总能续接；带 `resume` 创建的会话（续接用户目录里的对话）和本地客户端的会话不受影响。

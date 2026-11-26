@@ -11,6 +11,7 @@ agent it drives.
 | `gemini.svg` | lobe-icons `geminicli-color` |
 | `antigravity.svg` | lobe-icons `antigravity-color` |
 | `kimi.svg` | lobe-icons `kimi-color` |
+| `kiro.svg` | lobe-icons `kiro-color` |
 | `opencode.svg` | lobe-icons `opencode` |
 | `grok.svg` | lobe-icons `grok` |
 | `openclaw.svg` | lobe-icons `openclaw-color` |

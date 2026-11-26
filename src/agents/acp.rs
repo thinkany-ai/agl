@@ -581,6 +581,16 @@ mod tests {
     }
 
     #[test]
+    fn kiro_read_only_is_its_plan_mode() {
+        // Kiro asks over ACP for every tool call whatever its `autopilot`
+        // option says, so agl's own policy decides; of its modes only plan
+        // is one of agl's levels.
+        let ids = ["vibe", "spec", "quick-spec", "bug-fix", "plan", "autonomous"];
+        let pick = |a: &str| modes_for(a).iter().find(|m| ids.contains(m)).copied();
+        assert_eq!((pick("full"), pick("edit"), pick("ask"), pick("read_only")), (None, None, None, Some("plan")));
+    }
+
+    #[test]
     fn cleans_provider_errors() {
         let raw = r#"Internal error: {"error":{"message":"Permission denied: project suspended","code":403}}"#;
         assert_eq!(clean_error(raw), "Permission denied: project suspended");

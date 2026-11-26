@@ -16,6 +16,7 @@ pub fn builtin(id: &str) -> Option<&'static str> {
         "codex" => include_str!("../../assets/agent-icons/codex.svg"),
         "gemini" => include_str!("../../assets/agent-icons/gemini.svg"),
         "antigravity" => include_str!("../../assets/agent-icons/antigravity.svg"),
+        "kiro" => include_str!("../../assets/agent-icons/kiro.svg"),
         "opencode" => include_str!("../../assets/agent-icons/opencode.svg"),
         "kimi" => include_str!("../../assets/agent-icons/kimi.svg"),
         "grok" => include_str!("../../assets/agent-icons/grok.svg"),

@@ -31,6 +31,7 @@ const IMPORT_PREFIXES: &[&str] = &[
     "GROK_",
     "OPENROUTER_",
     "CURSOR_",
+    "KIRO_",
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "NO_PROXY",
@@ -44,6 +45,9 @@ const IMPORT_PREFIXES: &[&str] = &[
 struct ShellEnv {
     path: Vec<PathBuf>,
     vars: HashMap<String, String>,
+    /// Everything the login shell exports, for `${NAME}` in agent env
+    /// (`expand`); unlike `vars`, never given to children wholesale.
+    login: HashMap<String, String>,
 }
 
 /// The resolved environment; None until first needed or after `reload`.
@@ -178,14 +182,13 @@ fn resolve() -> ShellEnv {
         push(p);
     }
     let mut vars = HashMap::new();
-    if let Some(l) = login {
-        for (k, v) in l {
-            if IMPORT_PREFIXES.iter().any(|p| k.starts_with(p)) && std::env::var_os(&k).is_none() {
-                vars.insert(k, v);
-            }
+    let login = login.unwrap_or_default();
+    for (k, v) in &login {
+        if IMPORT_PREFIXES.iter().any(|p| k.starts_with(p)) && std::env::var_os(k).is_none() {
+            vars.insert(k.clone(), v.clone());
         }
     }
-    ShellEnv { path, vars }
+    ShellEnv { path, vars, login }
 }
 
 /// Resolve the login-shell environment now (it takes up to a few seconds).
@@ -255,6 +258,52 @@ pub fn var(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty()).or_else(|| get().vars.get(key).cloned().filter(|v| !v.is_empty()))
 }
 
+/// A variable as the user's shell has it: this process's environment, else
+/// what the login shell exports (any name, not only the imported ones).
+pub fn shell_var(key: &str) -> Option<String> {
+    std::env::var(key).ok().or_else(|| get().login.get(key).cloned())
+}
+
+/// `value` with each `${NAME}` replaced by `shell_var(NAME)`, or nothing
+/// when it is unset; `$${` stays a literal `${`. Lets an agent's configured
+/// environment name a variable from the user's shell instead of copying it.
+pub fn expand(value: &str) -> String {
+    expand_with(value, shell_var)
+}
+
+fn expand_with(value: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(ix) = rest.find('$') {
+        out.push_str(&rest[..ix]);
+        let after = &rest[ix + 1..];
+        if let Some(tail) = after.strip_prefix("${") {
+            out.push_str("${");
+            rest = tail;
+            continue;
+        }
+        let name_end = after.strip_prefix('{').and_then(|inner| {
+            let end = inner.find('}')?;
+            let name = &inner[..end];
+            let valid = name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            valid.then_some((name, end))
+        });
+        match name_end {
+            Some((name, end)) => {
+                out.push_str(&lookup(name).unwrap_or_default());
+                rest = &after[end + 2..];
+            }
+            None => {
+                out.push('$');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Find an executable on the agent PATH. Skips scripts whose interpreter is
 /// missing (broken pipx/uv shims), which would otherwise fail confusingly.
 pub fn which(name: &str) -> Option<PathBuf> {
@@ -296,6 +345,19 @@ fn runnable(p: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expands_shell_variables() {
+        let lookup = |k: &str| match k {
+            "TOKEN" => Some("abc".to_string()),
+            "HOST" => Some("example.com".to_string()),
+            _ => None,
+        };
+        assert_eq!(expand_with("${TOKEN}", lookup), "abc");
+        assert_eq!(expand_with("https://${HOST}/v1", lookup), "https://example.com/v1");
+        assert_eq!(expand_with("${MISSING}", lookup), "");
+        assert_eq!(expand_with("$${TOKEN} $5 ${1BAD} ${", lookup), "${TOKEN} $5 ${1BAD} ${");
+    }
 
     #[cfg(unix)]
     #[test]

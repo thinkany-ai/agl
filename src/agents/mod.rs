@@ -5,7 +5,7 @@
 //!   approvals, interrupt, model listing);
 //! - `codex`: persistent `codex app-server` JSON-RPC (approvals, steer,
 //!   interrupt, model/list);
-//! - ACP agents (gemini, antigravity, opencode, kimi, grok, …, plus any
+//! - ACP agents (gemini, antigravity, kiro, opencode, kimi, grok, …, plus any
 //!   custom one):
 //!   persistent JSON-RPC Agent Client Protocol;
 //! - one-shot JSON CLIs (cursor-agent, pi): one process per turn with native
@@ -143,6 +143,7 @@ pub fn registry(cfg: &Config) -> Vec<AgentDef> {
         def("codex", "Codex", Codex, &["codex"], &[], &[]),
         def("gemini", "Gemini CLI", Acp, &["gemini"], &["--acp"], &[("GEMINI_CLI_TRUST_WORKSPACE", "true")]),
         def("antigravity", "Antigravity", Acp, &["agy"], &["acp"], &[]),
+        def("kiro", "Kiro CLI", Acp, &["kiro-cli"], &["acp"], &[]),
         def("opencode", "OpenCode", Acp, &["opencode"], &["acp"], &[]),
         def("kimi", "Kimi Code", Acp, &["kimi"], &["acp"], &[]),
         def("grok", "Grok Build", Acp, &["grok"], &["agent", "stdio"], &[]),
@@ -645,8 +646,9 @@ pub(crate) fn base_command(bin: &std::path::Path, spec: &SpawnSpec) -> tokio::pr
             cmd.env_remove(k);
         }
     }
+    // `${NAME}` takes the value from the user's shell (see `shellenv::expand`).
     for (k, v) in &spec.def.env {
-        cmd.env(k, v);
+        cmd.env(k, shellenv::expand(v));
     }
     if let Some(home) = &spec.agent_home {
         for (k, v) in isolation::env(&spec.def, home) {

@@ -447,7 +447,7 @@ How approval requests are handled:
 |---|---|---|---|---|---|
 | claude | `claude -p` stream-json + control protocol | ✓ | ✓ | ✓ | ✓ (via `initialize`) |
 | codex | `codex app-server` JSON-RPC | ✓ | ✓ | ✓ (`turn/steer`) | ✓ (`model/list`) |
-| gemini, antigravity, opencode, kimi, grok, droid, openclaw, hermes, omp | ACP (first-party) | ✓ | ✓ | – (queued) | ✓ (session config) |
+| gemini, antigravity, kiro, opencode, kimi, grok, droid, openclaw, hermes, omp | ACP (first-party) | ✓ | ✓ | – (queued) | ✓ (session config) |
 | cursor, pi | one process per turn, native resume | – | – | – | cursor ✓ |
 | custom | `custom_agents` in config, any ACP CLI | ✓ | ✓ | – | ✓ |
 

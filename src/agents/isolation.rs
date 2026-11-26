@@ -26,6 +26,11 @@
 //!   be relative to its Gemini directory (`~/.gemini`), so agl passes the
 //!   path from there to the agent's home.
 //!
+//! - Kiro CLI: `KIRO_HOME=<home>` (its `~/.kiro`), with everything in the
+//!   person's `~/.kiro` but its sessions and logs linked in (settings,
+//!   agents, steering, skills, powers, per-workspace permissions, …), so it
+//!   runs as the person set it up. Its login is not in that directory.
+//!
 //! Other agents keep the person's home: moving theirs moves their login with
 //! it, and several of them replace a symbolically linked credentials file
 //! with a copy when they refresh it.
@@ -49,14 +54,14 @@ enum Isolation {
     /// Only its sessions; its login and settings stay the person's: Pi
     /// (`PI_CODING_AGENT_SESSION_DIR`), OMP (`--session-dir`), OpenCode
     /// (`OPENCODE_DB`, its session database), Antigravity
-    /// (`--app-data-dir`).
+    /// (`--app-data-dir`), Kiro (`KIRO_HOME`, the rest linked back).
     Sessions,
 }
 
 fn isolation(def: &AgentDef) -> Option<Isolation> {
     match (def.protocol, def.id.as_str()) {
         (Protocol::Codex | Protocol::Claude, _) => Some(Isolation::Home),
-        (Protocol::Pi, "pi") | (Protocol::Acp, "omp" | "opencode" | "antigravity") => Some(Isolation::Sessions),
+        (Protocol::Pi, "pi") | (Protocol::Acp, "omp" | "opencode" | "antigravity" | "kiro") => Some(Isolation::Sessions),
         _ => None,
     }
 }
@@ -140,6 +145,12 @@ pub fn env(def: &AgentDef, home: &Path) -> Vec<(String, String)> {
         return match def.id.as_str() {
             "pi" => vec![("PI_CODING_AGENT_SESSION_DIR".into(), home.join("sessions").display().to_string())],
             "opencode" => vec![("OPENCODE_DB".into(), home.join("opencode.db").display().to_string())],
+            "kiro" => {
+                if let Err(e) = link_kiro_config(&kiro_source(), home) {
+                    eprintln!("agent home {}: {e}", home.display());
+                }
+                vec![("KIRO_HOME".into(), home.display().to_string())]
+            }
             _ => Vec::new(),
         };
     }
@@ -196,6 +207,34 @@ fn top_level(config: &str, key: &str) -> Option<String> {
     None
 }
 
+/// The person's Kiro home.
+fn kiro_source() -> PathBuf {
+    shellenv::var("KIRO_HOME").map(PathBuf::from).unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join(".kiro"))
+}
+
+/// What Kiro keeps per conversation in its home; the rest is the person's
+/// setup.
+const KIRO_SESSION_ENTRIES: &[&str] = &["sessions", "session-index", "session-leases", "session-relationships", "logs"];
+
+/// Links each entry of the person's Kiro home but its sessions and logs into
+/// `home`, leaving alone what is already there.
+fn link_kiro_config(source: &Path, home: &Path) -> std::io::Result<()> {
+    let Ok(entries) = std::fs::read_dir(source) else { return Ok(()) };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        if KIRO_SESSION_ENTRIES.iter().any(|s| name == *s) {
+            continue;
+        }
+        let link = home.join(&name);
+        if std::fs::symlink_metadata(&link).is_ok() {
+            continue;
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(e.path(), &link)?;
+    }
+    Ok(())
+}
+
 /// Points `<home>/auth.json` at the person's, replacing a file Codex may
 /// have left there (the person's login is the one to keep).
 fn link_codex_login(source: &Path, home: &Path) -> std::io::Result<()> {
@@ -235,7 +274,7 @@ mod tests {
         assert_eq!(env(&agent("opencode"), &home), vec![("OPENCODE_DB".to_string(), home.join("opencode.db").display().to_string())]);
         assert!(env(&agent("omp"), &home).is_empty());
         assert_eq!(args(&agent("omp"), &home), vec!["--session-dir".to_string(), home.join("sessions").display().to_string()]);
-        for id in ["pi", "omp", "opencode", "antigravity"] {
+        for id in ["pi", "omp", "opencode", "antigravity", "kiro"] {
             assert!(home_for(&agent(id)).unwrap().ends_with(format!("agents/{id}")), "{id}");
         }
         assert!(env(&agent("antigravity"), &home).is_empty());
@@ -253,6 +292,30 @@ mod tests {
         assert_eq!(landed, resolved(&home.join("antigravity")));
         assert!(probe_home(&agent("antigravity")).unwrap().ends_with("agents/antigravity-probe"));
         assert_eq!(probe_home(&agent("omp")), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kiro_keeps_the_persons_setup_and_only_its_sessions_apart() {
+        let (source, home) = (dir("kiro-src"), dir("kiro-home"));
+        for d in ["settings", "agents", "sessions", "logs", "session-index"] {
+            std::fs::create_dir_all(source.join(d)).unwrap();
+        }
+        std::fs::create_dir_all(home.join("steering")).unwrap();
+        std::fs::create_dir_all(source.join("steering")).unwrap();
+        link_kiro_config(&source, &home).unwrap();
+        link_kiro_config(&source, &home).unwrap(); // again: nothing to do
+        assert_eq!(std::fs::read_link(home.join("settings")).unwrap(), source.join("settings"));
+        assert_eq!(std::fs::read_link(home.join("agents")).unwrap(), source.join("agents"));
+        for d in ["sessions", "logs", "session-index"] {
+            assert!(!home.join(d).exists(), "{d}");
+        }
+        assert!(std::fs::read_link(home.join("steering")).is_err(), "what is there stays");
+        let vars = env(&agent("kiro"), &home);
+        assert_eq!(vars, vec![("KIRO_HOME".to_string(), home.display().to_string())]);
+        assert!(args(&agent("kiro"), &home).is_empty());
+        std::fs::remove_dir_all(&source).unwrap();
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]

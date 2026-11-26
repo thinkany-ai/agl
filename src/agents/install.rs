@@ -20,6 +20,8 @@ enum Latest {
     GitHub(&'static str),
     /// A URL whose body is the version.
     Text(&'static str),
+    /// A JSON document with a top-level `version`.
+    Json(&'static str),
     /// The version directory named in Cursor's install script (read, never run).
     CursorInstaller,
 }
@@ -67,6 +69,14 @@ fn meta(id: &str) -> Meta {
             guide: Some("https://antigravity.google/"),
             // `agy update`; agl knows no published version to compare.
             self_update: Some("update"),
+            ..Meta::default()
+        },
+        "kiro" => Meta {
+            guide: Some("https://kiro.dev/docs/cli/installation/"),
+            installer: Some("curl -fsSL https://cli.kiro.dev/install | bash"),
+            self_update: Some("update"),
+            // The manifest the install script reads.
+            latest: Some(Json("https://prod.download.cli.kiro.dev/stable/latest/manifest.json")),
             ..Meta::default()
         },
         "opencode" => Meta {
@@ -229,7 +239,7 @@ pub async fn latest_version(id: &str) -> Option<String> {
             let to = fetch(&["-o", "/dev/null", "-w", "%{redirect_url}"], &format!("https://github.com/{repo}/releases/latest")).await?;
             return to.rsplit_once("/releases/tag/").map(|(_, t)| t.trim().to_string()).filter(|t| !t.is_empty() && t.len() <= 80);
         }
-        Latest::Text(url) => url.into(),
+        Latest::Text(url) | Latest::Json(url) => url.into(),
         Latest::CursorInstaller => "https://cursor.com/install".into(),
     };
     let body = fetch(&[], &url).await?;
