@@ -49,6 +49,9 @@
   .agents { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
   .pill { font-size: 11px; padding: 1px 8px; border-radius: 99px; background: var(--muted); color: var(--sub); }
   .pill.ok { color: var(--ok); }
+  .pill { display: inline-flex; align-items: center; gap: 4px; }
+  .agent-icon { width: 12px; height: 12px; flex: none; }
+  .agent-icon.mono { background: currentColor; -webkit-mask: var(--icon) center / contain no-repeat; mask: var(--icon) center / contain no-repeat; }
   .sessions { margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
   .sess { padding: 6px 8px; border-radius: 8px; cursor: pointer; display: flex; gap: 8px; align-items: center; }
   .sess:hover { background: var(--muted); }
@@ -184,6 +187,17 @@ if (!token) token = prompt("Hub token（启动 agl hub 时打印）") || "";
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+// An agent's icon (agl 0.3.19+) is SVG markup from the machine: never inline
+// it, show it as an image (scripts in it do not run). Single-colour icons draw
+// in currentColor, which an image renders black, so those become a mask
+// painted in the text colour.
+const agentIcon = (a) => {
+  if (typeof a.icon !== "string" || !a.icon.trim().startsWith("<")) return "";
+  const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(a.icon);
+  return a.icon.includes("currentColor")
+    ? `<span class="agent-icon mono" style="${esc(`--icon: url("${url}")`)}"></span>`
+    : `<img class="agent-icon" alt="" src="${esc(url)}">`;
+};
 const ACCESS = { full: "完全访问（不询问）", edit: "自动编辑，其余询问", ask: "每次询问", read_only: "只读" };
 
 const state = {
@@ -259,7 +273,7 @@ function renderSidebar() {
   el.innerHTML = state.machines.map((m) => {
     const sel = state.sel.machine === m.machine_id;
     const avail = (m.agents || []).filter((a) => a.available);
-    const agents = avail.map((a) => `<span class="pill ok" title="${esc((a.features || []).join(", "))}">${esc(a.id)}</span>`).join("");
+    const agents = avail.map((a) => `<span class="pill ok" title="${esc((a.features || []).join(", "))}">${agentIcon(a)}${esc(a.id)}</span>`).join("");
     const sessions = m.online ? (state.sessions[m.machine_id] || []).map((s) => `
       <div class="sess ${state.sel.session === s.id ? "sel" : ""}" onclick="selectSession('${m.machine_id}','${s.id}')">
         <span class="name">${esc(s.name || s.id)}</span><span class="pill">${esc(s.agent)}</span><span class="st ${esc(s.status)}">${s.status === "waiting" ? "待审批" : esc(s.status)}</span>

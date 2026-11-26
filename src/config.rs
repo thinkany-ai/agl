@@ -83,6 +83,10 @@ pub struct CustomAgent {
     pub protocol: String,
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+    /// SVG markup shown as the agent's icon (`AgentInfo::icon`); see
+    /// `agents::icons` for what is accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 fn default_protocol() -> String {

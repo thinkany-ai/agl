@@ -18,9 +18,13 @@
 //!   directory (empty for the default `~/.claude`), so its credentials are
 //!   read from, and refreshed in, the person's keychain item.
 //!
-//! - Pi, OMP and OpenCode: only their sessions move (Pi's
+//! - Pi, OMP, OpenCode and Antigravity: only their sessions move (Pi's
 //!   `PI_CODING_AGENT_SESSION_DIR`, OMP's `--session-dir`, OpenCode's
-//!   `OPENCODE_DB`), so the login and settings stay the person's as they are.
+//!   `OPENCODE_DB`, Antigravity's `--app-data-dir`), so the login and
+//!   settings stay the person's as they are. Antigravity's app data
+//!   directory holds its conversations, not its login or settings; it must
+//!   be relative to its Gemini directory (`~/.gemini`), so agl passes the
+//!   path from there to the agent's home.
 //!
 //! Other agents keep the person's home: moving theirs moves their login with
 //! it, and several of them replace a symbolically linked credentials file
@@ -44,14 +48,15 @@ enum Isolation {
     Home,
     /// Only its sessions; its login and settings stay the person's: Pi
     /// (`PI_CODING_AGENT_SESSION_DIR`), OMP (`--session-dir`), OpenCode
-    /// (`OPENCODE_DB`, its session database).
+    /// (`OPENCODE_DB`, its session database), Antigravity
+    /// (`--app-data-dir`).
     Sessions,
 }
 
 fn isolation(def: &AgentDef) -> Option<Isolation> {
     match (def.protocol, def.id.as_str()) {
         (Protocol::Codex | Protocol::Claude, _) => Some(Isolation::Home),
-        (Protocol::Pi, "pi") | (Protocol::Acp, "omp" | "opencode") => Some(Isolation::Sessions),
+        (Protocol::Pi, "pi") | (Protocol::Acp, "omp" | "opencode" | "antigravity") => Some(Isolation::Sessions),
         _ => None,
     }
 }
@@ -67,11 +72,61 @@ pub fn home_for(def: &AgentDef) -> Option<PathBuf> {
     }
 }
 
+/// Where a model-list probe of `def` keeps its throwaway session: agents
+/// that can only close one, not delete it, would otherwise leave an empty
+/// conversation in the person's history each time a hub refreshes models.
+pub fn probe_home(def: &AgentDef) -> Option<PathBuf> {
+    (isolation(def) == Some(Isolation::Sessions) && def.id == "antigravity").then(|| crate::config::home().join("agents").join("antigravity-probe"))
+}
+
 /// The command-line arguments that put an agent in `home`.
 pub fn args(def: &AgentDef, home: &Path) -> Vec<String> {
     match (isolation(def), def.id.as_str()) {
         (Some(Isolation::Sessions), "omp") => vec!["--session-dir".into(), home.join("sessions").display().to_string()],
+        (Some(Isolation::Sessions), "antigravity") => {
+            if let Err(e) = std::fs::create_dir_all(home) {
+                eprintln!("agent home {}: {e}", home.display());
+            }
+            let gemini = dirs::home_dir().unwrap_or_default().join(".gemini");
+            match relative_to(&gemini, home) {
+                Some(rel) => vec!["--app-data-dir".into(), rel.display().to_string()],
+                None => Vec::new(),
+            }
+        }
         _ => Vec::new(),
+    }
+}
+
+/// `to` as a path relative to `from`, through `..` where needed; both are
+/// resolved first (an existing prefix of each), so a symbolic link on either
+/// side cannot send `..` elsewhere. None when they share no root.
+fn relative_to(from: &Path, to: &Path) -> Option<PathBuf> {
+    let (from, to) = (resolved(from), resolved(to));
+    let (a, b): (Vec<_>, Vec<_>) = (from.components().collect(), to.components().collect());
+    let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    if common == 0 {
+        return None;
+    }
+    let mut out: PathBuf = a[common..].iter().map(|_| std::path::Component::ParentDir).collect();
+    out.extend(&b[common..]);
+    Some(if out.as_os_str().is_empty() { PathBuf::from(".") } else { out })
+}
+
+/// `p` with its longest existing prefix resolved through symbolic links.
+fn resolved(p: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut cur = p.to_path_buf();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(&cur) {
+            return rest.iter().rev().fold(real, |acc, c| acc.join(c));
+        }
+        match (cur.file_name().map(|n| n.to_os_string()), cur.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                cur = parent.to_path_buf();
+            }
+            _ => return p.to_path_buf(),
+        }
     }
 }
 
@@ -174,15 +229,40 @@ mod tests {
     }
 
     #[test]
-    fn pi_omp_and_opencode_keep_only_their_sessions_apart() {
+    fn pi_omp_opencode_and_antigravity_keep_only_their_sessions_apart() {
         let home = dir("sessions");
         assert_eq!(env(&agent("pi"), &home), vec![("PI_CODING_AGENT_SESSION_DIR".to_string(), home.join("sessions").display().to_string())]);
         assert_eq!(env(&agent("opencode"), &home), vec![("OPENCODE_DB".to_string(), home.join("opencode.db").display().to_string())]);
         assert!(env(&agent("omp"), &home).is_empty());
         assert_eq!(args(&agent("omp"), &home), vec!["--session-dir".to_string(), home.join("sessions").display().to_string()]);
-        for id in ["pi", "omp", "opencode"] {
+        for id in ["pi", "omp", "opencode", "antigravity"] {
             assert!(home_for(&agent(id)).unwrap().ends_with(format!("agents/{id}")), "{id}");
         }
+        assert!(env(&agent("antigravity"), &home).is_empty());
+        let a = args(&agent("antigravity"), &home.join("antigravity"));
+        assert_eq!(a[0], "--app-data-dir");
+        assert!(Path::new(&a[1]).is_relative(), "agy refuses an absolute app data dir");
+        // `..` taken lexically from the resolved Gemini directory, as agy does.
+        let mut landed = resolved(&dirs::home_dir().unwrap().join(".gemini"));
+        for c in Path::new(&a[1]).components() {
+            match c {
+                std::path::Component::ParentDir => assert!(landed.pop()),
+                c => landed.push(c),
+            }
+        }
+        assert_eq!(landed, resolved(&home.join("antigravity")));
+        assert!(probe_home(&agent("antigravity")).unwrap().ends_with("agents/antigravity-probe"));
+        assert_eq!(probe_home(&agent("omp")), None);
+    }
+
+    #[test]
+    fn relative_paths_climb_out_of_the_gemini_dir() {
+        let root = dir("rel");
+        let (gemini, target) = (root.join("u/.gemini"), root.join("u/.agl/agents/antigravity"));
+        assert_eq!(relative_to(&gemini, &target).unwrap(), PathBuf::from("../.agl/agents/antigravity"));
+        assert_eq!(relative_to(&gemini, &gemini.join("x")).unwrap(), PathBuf::from("x"));
+        assert_eq!(relative_to(&gemini, &gemini).unwrap(), PathBuf::from("."));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

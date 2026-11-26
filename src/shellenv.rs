@@ -115,6 +115,7 @@ fn extra_dirs() -> Vec<PathBuf> {
             ".opencode/bin",
             ".kimi-code/bin",
             ".grok/bin",
+            ".gemini/bin",
         ] {
             v.push(home.join(d));
         }

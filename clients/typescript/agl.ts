@@ -85,6 +85,12 @@ export interface InstallInfo {
 
 export interface AgentInfo {
   id: string; name: string; protocol: string; available: boolean; path?: string; version?: string; features: string[];
+  /**
+   * agl 0.3.19+: SVG markup (square, sized by its container). Comes from the
+   * machine: show it as an image (`data:image/svg+xml,…`), or sanitize it
+   * before inlining.
+   */
+  icon?: string;
   /** Empty from agl 0.2.0 and earlier. */
   status?: "ready" | "desktop-only" | "not-found";
   desktop_app?: string; install?: InstallInfo;

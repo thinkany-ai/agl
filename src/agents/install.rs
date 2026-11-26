@@ -62,6 +62,13 @@ fn meta(id: &str) -> Meta {
             latest: Some(Npm),
             ..Meta::default()
         },
+        "antigravity" => Meta {
+            apps: &["Antigravity.app"],
+            guide: Some("https://antigravity.google/"),
+            // `agy update`; agl knows no published version to compare.
+            self_update: Some("update"),
+            ..Meta::default()
+        },
         "opencode" => Meta {
             apps: &["OpenCode.app"],
             package: Some("opencode-ai"),

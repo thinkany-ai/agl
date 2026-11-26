@@ -35,8 +35,8 @@ fn setup() -> Arc<Manager> {
         machine_id: "test-machine".into(),
         approval_timeout_secs: 1,
         custom_agents: vec![
-            CustomAgent { id: "mock".into(), name: None, command: fixture("mock_acp.py"), args: vec![], protocol: "acp".into(), env: Default::default() },
-            CustomAgent { id: "mockclaude".into(), name: None, command: fixture("mock_claude.py"), args: vec![], protocol: "claude".into(), env: Default::default() },
+            CustomAgent { id: "mock".into(), name: None, command: fixture("mock_acp.py"), args: vec![], protocol: "acp".into(), icon: None, env: Default::default() },
+            CustomAgent { id: "mockclaude".into(), name: None, command: fixture("mock_claude.py"), args: vec![], protocol: "claude".into(), icon: None, env: Default::default() },
         ],
         ..Config::default()
     };

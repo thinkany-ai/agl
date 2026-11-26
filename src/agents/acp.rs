@@ -48,7 +48,7 @@ pub struct AcpDriver {
 fn modes_for(access: &str) -> &'static [&'static str] {
     match access {
         "full" => &["yolo", "bypassPermissions", "bypass", "full-access", "auto"],
-        "edit" => &["autoEdit", "acceptEdits", "auto-edit", "auto"],
+        "edit" => &["autoEdit", "acceptEdits", "auto-edit", "accept-edits", "auto"],
         "read_only" => &["plan", "read-only", "readonly"],
         _ => &["default"],
     }
@@ -166,10 +166,14 @@ impl AcpDriver {
         let cwd = spec.cwd.display().to_string();
 
         let mut opened: Option<Value> = None;
-        // Instructions an agent takes on the session (Grok's `_meta.rules`),
-        // given again on a load or resume: they belong to this process.
+        // Instructions an agent takes on the session (Grok's `_meta.rules`,
+        // Antigravity's `_meta.antigravity.systemPrompt.append`), given again
+        // on a load or resume: they belong to this process.
         let meta = match (&spec.instructions, spec.def.appends_instructions()) {
             (Some(text), Some(super::InstructionsVia::AcpMetaRules)) => Some(json!({"rules": text})),
+            (Some(text), Some(super::InstructionsVia::AcpMetaSystemPromptAppend)) => {
+                Some(json!({"antigravity": {"systemPrompt": {"append": text}}}))
+            }
             _ => None,
         };
         let with_meta = |mut v: Value| {
@@ -242,6 +246,15 @@ impl AcpDriver {
                 bail!("{} rejected model `{m}`: {e:#}", self.name);
             }
         }
+        // Effort -> the agent's thinking-level option, where it has one.
+        if let Some(e) = &spec.effort {
+            if let Some(level) = thought_level(&opened, e) {
+                let params = json!({"sessionId": self.session_id, "configId": level.0, "value": level.1});
+                if let Err(err) = self.peer.request("session/set_config_option", params, ACK).await {
+                    bail!("{} rejected effort `{e}`: {err:#}", self.name);
+                }
+            }
+        }
         let _ = self.tx.send((self.generation, DriverMsg::Event(AgentEvent::Info { native_id: Some(self.session_id.clone()), model })));
         Ok(())
     }
@@ -312,21 +325,50 @@ fn current_model(opened: &Value) -> Option<String> {
         .or_else(|| opened["models"]["currentModelId"].as_str().map(String::from))
 }
 
-/// Models offered by the agent, from a session's open reply.
-pub(crate) fn models_of(opened: &Value) -> Vec<Value> {
-    if let Some(opt) = opened["configOptions"].as_array().into_iter().flatten().find(|o| o["category"] == "model") {
-        let mut out = Vec::new();
-        for o in opt["options"].as_array().into_iter().flatten() {
-            // Options may be grouped.
-            if let Some(group) = o["options"].as_array() {
-                for g in group {
-                    out.push(json!({"id": g["value"], "name": g["name"]}));
-                }
-            } else {
-                out.push(json!({"id": o["value"], "name": o["name"]}));
-            }
+/// A session's config option of `category`, from its open reply.
+fn config_option<'a>(opened: &'a Value, category: &str) -> Option<&'a Value> {
+    opened["configOptions"].as_array().into_iter().flatten().find(|o| o["category"] == category)
+}
+
+/// The values of a select option, groups flattened, as (value, name).
+fn option_values(opt: &Value) -> Vec<(&Value, &Value)> {
+    let mut out = Vec::new();
+    for o in opt["options"].as_array().into_iter().flatten() {
+        if let Some(group) = o["options"].as_array() {
+            out.extend(group.iter().map(|g| (&g["value"], &g["name"])));
+        } else {
+            out.push((&o["value"], &o["name"]));
         }
-        return out;
+    }
+    out
+}
+
+/// The `(configId, value)` that sets `effort` through the agent's
+/// `thought_level` option: the same value, or for `max` (which agl's other
+/// agents take) the highest one. None when the agent has no such option or
+/// value.
+fn thought_level(opened: &Value, effort: &str) -> Option<(String, String)> {
+    let opt = config_option(opened, "thought_level")?;
+    let values: Vec<&str> = option_values(opt).into_iter().filter_map(|(v, _)| v.as_str()).collect();
+    let value = values.iter().find(|v| **v == effort).or(if effort == "max" { values.last() } else { None })?;
+    Some((opt["id"].as_str()?.to_string(), value.to_string()))
+}
+
+/// Models offered by the agent, from a session's open reply, with the
+/// efforts its `thought_level` option offers.
+pub(crate) fn models_of(opened: &Value) -> Vec<Value> {
+    let efforts: Option<Vec<&Value>> = config_option(opened, "thought_level").map(|o| option_values(o).into_iter().map(|(v, _)| v).collect());
+    if let Some(opt) = config_option(opened, "model") {
+        return option_values(opt)
+            .into_iter()
+            .map(|(id, name)| {
+                let mut m = json!({"id": id, "name": name});
+                if let Some(e) = &efforts {
+                    m["efforts"] = json!(e);
+                }
+                m
+            })
+            .collect();
     }
     opened["models"]["availableModels"]
         .as_array()
@@ -438,8 +480,14 @@ fn map_update(u: &Value, state: &Arc<Mutex<State>>) -> Vec<DriverMsg> {
 pub async fn list_models(bin: &Path, def: &super::AgentDef) -> Result<Vec<Value>> {
     let mut spec = super::probe_spec(&def.id, super::Protocol::Acp);
     spec.def = def.clone();
+    // A probe's throwaway session stays out of the person's history where
+    // the agent cannot delete it.
+    spec.agent_home = super::isolation::probe_home(def);
     let mut cmd = base_command(bin, &spec);
     cmd.args(&def.args);
+    if let Some(home) = &spec.agent_home {
+        cmd.args(super::isolation::args(def, home));
+    }
     let mut child = cmd.spawn()?;
     let peer = Peer::new(child.stdin.take().unwrap(), "acp");
     let p = peer.clone();
@@ -509,6 +557,27 @@ mod tests {
         assert_eq!(models_of(&gemini)[0]["id"], "auto");
         assert_eq!(modes_for("full")[0], "yolo");
         assert_eq!(modes_for("read_only")[0], "plan");
+    }
+
+    #[test]
+    fn antigravity_thought_level_is_effort() {
+        let opened = json!({"configOptions": [
+            {"id": "model", "category": "model", "currentValue": "gemini-4-hydrogen",
+             "options": [{"value": "gemini-4-hydrogen", "name": "Gemini 4 Hydrogen"}, {"value": "gemini-3.8-flash", "name": "Gemini 3.8 Flash"}]},
+            {"id": "thought_level", "category": "thought_level", "currentValue": "high",
+             "options": [{"value": "low", "name": "Low"}, {"value": "medium", "name": "Medium"}, {"value": "high", "name": "High"}, {"value": "xhigh", "name": "Extra"}]},
+            {"id": "mode", "category": "mode", "currentValue": "default", "options": [{"value": "accept-edits", "name": "Accept edits"}]}]});
+        let models = models_of(&opened);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[1]["efforts"], json!(["low", "medium", "high", "xhigh"]));
+        assert_eq!(thought_level(&opened, "medium"), Some(("thought_level".into(), "medium".into())));
+        assert_eq!(thought_level(&opened, "max"), Some(("thought_level".into(), "xhigh".into())));
+        assert_eq!(thought_level(&opened, "minimal"), None);
+        assert_eq!(thought_level(&json!({}), "high"), None);
+        // Its modes: default, accept-edits, auto, plan.
+        let ids = ["default", "accept-edits", "auto", "plan"];
+        let pick = |a: &str| modes_for(a).iter().find(|m| ids.contains(m)).copied();
+        assert_eq!((pick("full"), pick("edit"), pick("ask"), pick("read_only")), (Some("auto"), Some("accept-edits"), Some("default"), Some("plan")));
     }
 
     #[test]

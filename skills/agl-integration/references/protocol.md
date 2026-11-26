@@ -126,7 +126,7 @@ vanish for its own creator; `"shared"` (the default) is accepted.
 | `ping` | – | `{pong, version, protocol, started_at}`. `started_at` (0.3.12) as in `machine.info`: a new value means the daemon restarted. |
 | `machine.info` | – | `{machine_id, hostname, os, arch, version, protocol, agents[], tools[], home, started_at}`. `home` is the user's home directory; `started_at` (unix ms) changes when the daemon restarts, which ends every running turn: a hub that sees a new value in `hello` can fail the turns it was waiting for. Both are absent before agl 0.3.0. From 0.3.17, a product shipping agl under its own name adds `product: {name, version}` ([Embedding and branding](desktop-app.md#embedding-and-branding-agl-0317)); `version` stays agl's. From 0.3.18, `computer_name` (the name the person gave the computer, macOS only) and `model` (`"MacBook Pro"`, `"Mac mini"`; macOS only) when known — a hub can name a new computer by them. |
 | `agents.list` | `{check_updates?}` | `AgentInfo[]`: `{id, name, protocol, available, path, version, features[], status, desktop_app?, install?, latest_version?, update?, capabilities?}`. See [Agent discovery](#agent-discovery). |
-| `agents.models` | `{agent}` | `{agent, models: [{id, name, description?, default?, efforts?[]}]}`. Never starts a conversation the user would see. |
+| `agents.models` | `{agent}` | `{agent, models: [{id, name, description?, default?, efforts?[]}]}`. Never starts a conversation the user would see. From 0.3.19, an ACP agent with a `thought_level` option (antigravity: `low`/`medium`/`high`/`xhigh`) lists its levels as `efforts` and takes `effort` (`max` = its highest). |
 | `daemon.status` | – | Version, protocol, pid, `started_at` (0.3.12), port, `hubs: [{url, status, access, share_local}]` (a hub sees only its own entry), visible sessions, `busy` (sessions with a turn running or queued, from agl 0.3.2; includes built-in executions from 0.3.14), `executions` (0.3.14, caller-visible running commands), `managed` (started by the autostart service, which restarts it; from 0.3.8), live processes, defaults |
 | `daemon.update` | `{if_idle?}` | From agl 0.3.2. Updates agl to the newest release (checked against its sha256) and restarts the daemon on it: `{updated, current, latest, busy?, busy_elsewhere?}`. With `if_idle`, nothing happens while a session runs a turn (`busy`). A restart ends running turns, so a hub never ends another's: while a session the hub did not create (another hub's, or a local one) runs a turn, nothing happens even without `if_idle` (`busy_elsewhere`, also counted in `busy`). Any hub link may call it (from agl 0.3.5; before, `full` only): it installs only the official release, never a binary the hub picks. Below `full`, the update always behaves as `if_idle`; the link comes back by itself. The new daemon is started by the autostart service when it runs this daemon, otherwise by agl itself (before 0.3.8 an installed but idle service unit made agl skip that, and the daemon stayed down). Under launchd agl also kickstarts the job, since launchd may defer a KeepAlive respawn, and even a RunAtLoad start after `agl service install`, indefinitely (0.3.9 / 0.3.10). An agl inside an app bundle is updated with the app instead. |
 | `session.create` | `{agent, cwd?, model?, effort?, access?, name?, resume?, warm?, visibility?, history?, extra_args?, instructions?, ephemeral?, app_name?}` | `SessionMeta`. Details: |
@@ -266,7 +266,7 @@ local only. A hub never sees `instructions` back in session metadata.
 | field | effect | agents |
 |---|---|---|
 | `extra_args: string[]` | Appended to the agent's launch arguments, after agl's own. | every agent (`extra_args` feature): claude after its flags; codex after `app-server …`; ACP after the agent's own args; cursor before the `--` that precedes the prompt; pi at the end |
-| `instructions: string` | Extra system / developer instructions, on top of the agent's own (not replacing them). | claude (`--append-system-prompt`), codex (`developerInstructions`, on `thread/start` and `thread/resume`); from 0.3.18 also pi and omp (`--append-system-prompt`, on every launch) and grok (ACP `_meta.rules` on `session/new`, `session/load` and `session/resume`): the `instructions` feature. Other agents have no native way and reject it: `` agent `<id>` does not support `instructions` ``. Blank text is ignored. |
+| `instructions: string` | Extra system / developer instructions, on top of the agent's own (not replacing them). | claude (`--append-system-prompt`), codex (`developerInstructions`, on `thread/start` and `thread/resume`); from 0.3.18 also pi and omp (`--append-system-prompt`, on every launch) and grok (ACP `_meta.rules` on `session/new`, `session/load` and `session/resume`); from 0.3.19 antigravity (ACP `_meta.antigravity.systemPrompt.append`, the same way): the `instructions` feature. Other agents have no native way and reject it: `` agent `<id>` does not support `instructions` ``. Blank text is ignored. |
 | `ephemeral: true` | The agent keeps no conversation of its own on disk. | claude (`--no-session-persistence`), codex (ephemeral thread, no rollout): the `ephemeral` feature. Others reject it: `` agent `<id>` does not support `ephemeral` ``. |
 
 Limits: at most 64 `extra_args` of at most 4096 bytes each, `instructions`
@@ -447,7 +447,7 @@ How approval requests are handled:
 |---|---|---|---|---|---|
 | claude | `claude -p` stream-json + control protocol | ✓ | ✓ | ✓ | ✓ (via `initialize`) |
 | codex | `codex app-server` JSON-RPC | ✓ | ✓ | ✓ (`turn/steer`) | ✓ (`model/list`) |
-| gemini, opencode, kimi, grok, droid, openclaw, hermes, omp | ACP (first-party) | ✓ | ✓ | – (queued) | ✓ (session config) |
+| gemini, antigravity, opencode, kimi, grok, droid, openclaw, hermes, omp | ACP (first-party) | ✓ | ✓ | – (queued) | ✓ (session config) |
 | cursor, pi | one process per turn, native resume | – | – | – | cursor ✓ |
 | custom | `custom_agents` in config, any ACP CLI | ✓ | ✓ | – | ✓ |
 
@@ -478,11 +478,17 @@ Custom agents carry no `install` or update fields. Detection only reads; nothing
   "idle_timeout_secs": 600, "session_ttl_secs": 604800,
   "approval_timeout_secs": 600, "stall_timeout_secs": 120, "turn_timeout_secs": 0,
   "tool_output_limit": 16384, "history_limit": 2000, "history_image_limit": 16,
-  "custom_agents": [{"id": "goose", "command": "goose", "args": ["acp"], "protocol": "acp"}],
+  "custom_agents": [{"id": "goose", "command": "goose", "args": ["acp"], "protocol": "acp", "icon": "<svg …>…</svg>"}],
   "extra_paths": ["~/Library/Application Support/MyApp/bin"],
   "hubs": [{"url": "https://app.example.com/agl", "token": "aglm_…", "access": "ask", "share_local": true, "app_name": "Sumus"}]
 }
 ```
+
+`custom_agents[].icon` (from 0.3.19): SVG markup for the agent's `icon` in
+`agents.list`. agl passes it on only as plain SVG under 32 KiB, with no
+scripts, event handlers, `javascript:` or external references, `<use>` or
+`foreignObject`; otherwise it logs why and keeps the built-in icon for that id,
+if any.
 
 `hubs` is written by `agl connect` / `agl disconnect`; the single
 `hub_url` / `hub_token` fields of agl ≤0.1 are migrated into it on load.

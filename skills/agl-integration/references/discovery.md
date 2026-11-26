@@ -97,8 +97,9 @@ A missing agent:
 
 | field | meaning |
 |---|---|
-| `id` | Stable key, e.g. `claude`, `codex`, `gemini`, `opencode`, `kimi`, `grok`, `droid`, `openclaw`, `hermes`, `omp`, `cursor`, `pi`, plus `custom_agents` ids. Pass it as `agent` to `session.create` and `agents.models`. |
+| `id` | Stable key, e.g. `claude`, `codex`, `gemini`, `antigravity`, `opencode`, `kimi`, `grok`, `droid`, `openclaw`, `hermes`, `omp`, `cursor`, `pi`, plus `custom_agents` ids. Pass it as `agent` to `session.create` and `agents.models`. |
 | `name` | Display name |
+| `icon` | From agl 0.3.19. The agent's icon as SVG markup: square, a `viewBox` and no fixed size, so it fills its container. Every built-in agent has its maker's mark; a custom agent has its own `icon` from `custom_agents`, or none. Single-colour icons draw in `currentColor`. It comes from the machine, so treat it as untrusted: show it as an image (`<img src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(icon)}">`, where scripts do not run), or sanitize it before inlining. In an image `currentColor` is black; for a dark theme use it as a CSS mask painted in the text colour, as the reference hub does (`assets/hub.html`, `agentIcon`). Absent from older agl: fall back to your own. |
 | `protocol` | How agl drives it: `claude`, `codex`, `acp`, `oneshot` |
 | `available` | agl found a runnable executable. Only these can be used in `session.create`. |
 | `path` | That executable (`AGL_<ID>_BIN` overrides the lookup) |
@@ -110,7 +111,7 @@ A missing agent:
 | `install.install_command` | For a missing agent: the official installer or `npm install -g …` |
 | `install.update_command` | For an installed agent: the command that updates this installation in place, e.g. `'<brew>' upgrade gemini-cli` or `'<path>' update`. Absent for `app-bundle`. |
 | `install.guide` | The agent's install docs |
-| `latest_version` | Only with `check_updates`: the newest published version, from npm, GitHub releases or the vendor's channel. Absent when agl knows no source (kimi, droid, custom agents) or the lookup failed. |
+| `latest_version` | Only with `check_updates`: the newest published version, from npm, GitHub releases or the vendor's channel. Absent when agl knows no source (kimi, droid, antigravity, custom agents) or the lookup failed. |
 | `update` | Only with `check_updates`, for installed agents: `available`, `current` or `unknown`. A version agl cannot parse or order is `unknown`, never `current`. |
 
 Custom agents have no `install`, `desktop_app` or update fields. Every new

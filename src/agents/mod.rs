@@ -5,7 +5,8 @@
 //!   approvals, interrupt, model listing);
 //! - `codex`: persistent `codex app-server` JSON-RPC (approvals, steer,
 //!   interrupt, model/list);
-//! - ACP agents (gemini, opencode, kimi, grok, …, plus any custom one):
+//! - ACP agents (gemini, antigravity, opencode, kimi, grok, …, plus any
+//!   custom one):
 //!   persistent JSON-RPC Agent Client Protocol;
 //! - one-shot JSON CLIs (cursor-agent, pi): one process per turn with native
 //!   resume.
@@ -17,6 +18,7 @@
 mod acp;
 mod claude;
 mod codex;
+pub mod icons;
 mod install;
 pub mod isolation;
 mod oneshot;
@@ -84,11 +86,16 @@ pub struct AgentDef {
 impl AgentDef {
     /// What this agent takes (`Protocol::features`), plus `instructions`
     /// for the built-in agents whose CLI appends to its own system prompt:
-    /// Pi and OMP (`--append-system-prompt`), Grok (ACP `_meta.rules`).
+    /// Pi and OMP (`--append-system-prompt`), Grok (ACP `_meta.rules`),
+    /// Antigravity (ACP `_meta.antigravity.systemPrompt.append`); and
+    /// `effort` for Antigravity (its ACP `thought_level` option).
     pub fn features(&self) -> Vec<String> {
         let mut f = self.protocol.features();
         if self.appends_instructions().is_some() && !f.iter().any(|x| x == "instructions") {
             f.push("instructions".into());
+        }
+        if (self.id.as_str(), self.protocol) == ("antigravity", Protocol::Acp) && !f.iter().any(|x| x == "effort") {
+            f.push("effort".into());
         }
         f
     }
@@ -99,6 +106,7 @@ impl AgentDef {
         match (self.id.as_str(), self.protocol) {
             ("pi", Protocol::Pi) | ("omp", Protocol::Acp) => Some(InstructionsVia::AppendSystemPromptFlag),
             ("grok", Protocol::Acp) => Some(InstructionsVia::AcpMetaRules),
+            ("antigravity", Protocol::Acp) => Some(InstructionsVia::AcpMetaSystemPromptAppend),
             _ => None,
         }
     }
@@ -111,6 +119,9 @@ pub enum InstructionsVia {
     AppendSystemPromptFlag,
     /// `_meta.rules` on ACP `session/new` (and load / resume).
     AcpMetaRules,
+    /// `_meta.antigravity.systemPrompt.append` on ACP `session/new` (and
+    /// load / resume).
+    AcpMetaSystemPromptAppend,
 }
 
 fn def(id: &str, name: &str, protocol: Protocol, commands: &[&str], args: &[&str], env: &[(&str, &str)]) -> AgentDef {
@@ -131,6 +142,7 @@ pub fn registry(cfg: &Config) -> Vec<AgentDef> {
         def("claude", "Claude Code", Claude, &["claude"], &[], &[]),
         def("codex", "Codex", Codex, &["codex"], &[], &[]),
         def("gemini", "Gemini CLI", Acp, &["gemini"], &["--acp"], &[("GEMINI_CLI_TRUST_WORKSPACE", "true")]),
+        def("antigravity", "Antigravity", Acp, &["agy"], &["acp"], &[]),
         def("opencode", "OpenCode", Acp, &["opencode"], &["acp"], &[]),
         def("kimi", "Kimi Code", Acp, &["kimi"], &["acp"], &[]),
         def("grok", "Grok Build", Acp, &["grok"], &["agent", "stdio"], &[]),
@@ -436,9 +448,11 @@ impl Driver {
 pub async fn detect(cfg: &Config, check_updates: bool) -> Vec<AgentInfo> {
     let defs = registry(cfg);
     let custom: Vec<String> = cfg.custom_agents.iter().map(|c| c.id.clone()).collect();
+    let custom_icons: HashMap<String, Option<String>> = cfg.custom_agents.iter().map(|c| (c.id.clone(), c.icon.clone())).collect();
     let probes = defs.into_iter().map(|d| {
         // A custom agent is the user's own command, not the built-in one.
         let builtin = !custom.contains(&d.id);
+        let icon = icons::for_agent(&d.id, custom_icons.get(&d.id).and_then(|i| i.as_deref()));
         async move {
             let path = find_binary(&d);
             let (version, latest_version, capabilities) = match &path {
@@ -461,6 +475,7 @@ pub async fn detect(cfg: &Config, check_updates: bool) -> Vec<AgentInfo> {
             AgentInfo {
                 id: d.id.clone(),
                 name: d.name.clone(),
+                icon,
                 protocol: d.protocol.name().into(),
                 available: path.is_some(),
                 install: builtin.then(|| install::install_info(&d.id, path.as_deref())).flatten(),
@@ -1076,7 +1091,7 @@ mod tests {
     fn instructions_are_taken_by_the_agents_that_append_them() {
         let reg = registry(&Config::default());
         let takes = |id: &str| reg.iter().find(|d| d.id == id).unwrap().features().iter().any(|f| f == "instructions");
-        for id in ["claude", "codex", "pi", "omp", "grok"] {
+        for id in ["claude", "codex", "pi", "omp", "grok", "antigravity"] {
             assert!(takes(id), "{id}");
         }
         for id in ["gemini", "opencode", "kimi", "hermes", "openclaw", "droid", "cursor"] {

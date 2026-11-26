@@ -2,7 +2,7 @@
 
 English | [简体中文](README.zh-CN.md)
 
-agl is a single Rust binary (about 4 MB) that operates on local resources and drives installed coding agents: Claude Code, Codex, Gemini, Kimi, OpenCode, Grok, Cursor and more.
+agl is a single Rust binary (about 4 MB) that operates on local resources and drives installed coding agents: Claude Code, Codex, Gemini, Antigravity, Kimi, OpenCode, Grok, Cursor and more.
 
 - **Use your own cloud model:** built-in `read`, `write`, `edit` and `exec` tools operate on local resources with no coding agent installed. Your app owns the model calls and agent loop; writes and commands can wait for the person's approval.
 - **Run agents well:** persistent warm sessions, concurrency and queueing, approvals, mid-turn steering, interrupts, model lists and automatic garbage collection.
@@ -134,7 +134,7 @@ Other files in `~/.agl/`:
 | `src/agents/` | Agent drivers: `claude.rs`, `codex.rs`, `acp.rs`, `oneshot.rs` |
 | `src/session.rs` | Session manager: warm sessions, queueing, steering, approvals, GC, process budget |
 | `src/daemon.rs`, `src/link.rs` | Local daemon and the machine link to a hub |
-| `src/hub.rs`, `assets/` | Reference hub, web UI, install script |
+| `src/hub.rs`, `assets/` | Reference hub, web UI, install script, agent icons (`assets/agent-icons/`) |
 | `clients/typescript/` | Zero-dependency TypeScript client |
 | `skills/agl-integration/` | Integration skill for coding agents |
 | `docs/` | Comparison and benchmarks |
@@ -144,7 +144,7 @@ Other files in `~/.agl/`:
 - `full` access lets the agent run any command as you. Sessions created by a hub default to `ask` (per link: `agl connect … --access`), so remote use asks before acting unless you opt in.
 - The local daemon listens on 127.0.0.1 only, and every connection must present the token from `daemon.json`.
 - Launch settings that can change how an agent runs (`extra_args`, `instructions`, `ephemeral`) are accepted from local connections only, never from a hub. The one exception is `instructions`, from a hub the person allows on this computer (the link's `instructions`).
-- A hub's Claude Code, Codex, Pi, OMP and OpenCode sessions can keep their conversations out of the person's own history and apps: with the link's `isolated_agents`, Claude Code and Codex run with data homes of their own under `$AGL_HOME/agents/`, signed in with the person's login, and Pi, OMP and OpenCode keep only their sessions there.
+- A hub's Claude Code, Codex, Pi, OMP, OpenCode and Antigravity sessions can keep their conversations out of the person's own history and apps: with the link's `isolated_agents`, Claude Code and Codex run with data homes of their own under `$AGL_HOME/agents/`, signed in with the person's login, and Pi, OMP, OpenCode and Antigravity keep only their sessions there.
 - A hub's file calls (`fs.read`, `fs.write`, `fs.edit`) never reach `$AGL_HOME` (links' tokens, other hubs' sessions, history and isolated agent homes), and a Claude Code session's `instructions` go through a 0600 file, not the command line other users can see.
 - On macOS, the launcher modes that run under a product's own privacy grants (`__hold`, `__held`, a helper's `__computer --responsible`) start only from this home's daemon or the same executable.
 - The hub stores only hashes of machine tokens, and each machine can be revoked individually. Pairing codes are single-use and expire after 10 minutes.

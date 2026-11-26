@@ -218,6 +218,11 @@ pub struct AgentInfo {
     pub id: String,
     #[serde(default)]
     pub name: String,
+    /// The agent's icon as SVG markup, square and sized by its container
+    /// (agl 0.3.19+): the maker's mark for built-in agents, a custom agent's
+    /// own `icon`. Absent when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
     /// claude | codex | acp | oneshot
     #[serde(default)]
     pub protocol: String,
