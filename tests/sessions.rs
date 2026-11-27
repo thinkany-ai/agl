@@ -243,6 +243,13 @@ async fn sessions_end_to_end() {
     assert_eq!(t.text, "allow", "full access allows by policy");
     assert!(has(&t.events, |e| matches!(e, AgentEvent::PermissionRequest { decided_by: Some(by), .. } if by == "policy")));
 
+    // Resumed, Claude Code first ends a turn of its own (a background task's
+    // notification): the person's turn ends with their answer, not there.
+    mgr.gc(true).await;
+    wait_status(&mgr, &cf, "suspended").await;
+    let t = turn(&mgr, &mut rx, &cf, "again", "queue", None).await;
+    assert_eq!((t.outcome.as_str(), t.text.as_str(), t.answer.as_deref()), ("completed", "echo: again", Some("echo: again")));
+
     // --- Launch settings: extra_args, instructions, ephemeral ---------------
     let p = CreateParams {
         agent: "mockclaude".into(),

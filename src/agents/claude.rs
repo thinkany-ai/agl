@@ -305,6 +305,15 @@ impl State {
             }
             "result" => {
                 self.wrote_text = false;
+                // Claude Code also runs turns of its own: a background task's
+                // notification is answered like a message, and its `result`
+                // names where it came from. After `--resume`, the tasks the
+                // last process left behind are reported that way before the
+                // person's message is read, so that `result` is not their
+                // turn's end; theirs has no origin.
+                if f["origin"]["kind"] == "task-notification" {
+                    return out;
+                }
                 let failed = f["is_error"].as_bool().unwrap_or(false);
                 let error = failed.then(|| {
                     f["result"]
@@ -423,6 +432,11 @@ mod tests {
 
         let failed = json!({"type": "result", "is_error": true, "result": "Credit balance is too low"});
         assert!(matches!(&s.map(&failed)[0], DriverMsg::TurnDone { outcome, error: Some(e), text: None, .. } if outcome == "failed" && e.contains("Credit")));
+
+        // As Claude Code 2.1 sends it after `--resume`, for a background
+        // command the last process left running.
+        let notified = json!({"type": "result", "subtype": "success", "is_error": false, "num_turns": 0, "result": "", "origin": {"kind": "task-notification"}});
+        assert!(s.map(&notified).is_empty(), "a task notification's result does not end the person's turn");
 
         let done = json!({"type": "result", "is_error": false, "result": "All tests pass."});
         assert!(matches!(&s.map(&done)[0], DriverMsg::TurnDone { text: Some(t), .. } if t == "All tests pass."), "the result text is the final answer");

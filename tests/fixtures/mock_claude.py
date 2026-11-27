@@ -2,7 +2,7 @@
 """A scripted Claude Code (`claude -p --input-format stream-json`) for agl's
 tests. Prompt keywords: TOOL asks `can_use_tool` and reports the decision;
 ARGS answers with its command line (JSON); anything else is echoed as
-streamed text deltas."""
+streamed text deltas. Resumed, it first reports a task notification's turn."""
 import json
 import sys
 import uuid
@@ -50,6 +50,13 @@ for line in lines:
     if not sent_init:
         send({"type": "system", "subtype": "init", "session_id": session, "model": "mock-model"})
         sent_init = True
+        if "--resume" in sys.argv:
+            # As Claude Code 2.1 does for a background command the last
+            # process left running: its notification is a turn of its own,
+            # over before the person's message is read.
+            send({"type": "result", "subtype": "success", "is_error": False, "result": "", "session_id": session,
+                  "usage": {"input_tokens": 0, "output_tokens": 0}, "total_cost_usd": 0, "num_turns": 0,
+                  "origin": {"kind": "task-notification"}})
     text = "".join(b.get("text", "") for b in msg["message"]["content"])
     if "TOOL" in text:
         send({"type": "assistant", "parent_tool_use_id": None, "message": {"content": [
