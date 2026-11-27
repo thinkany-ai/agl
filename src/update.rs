@@ -173,8 +173,7 @@ pub async fn stop_unmanaged_daemon() {
 
 async fn wait_exit(pid: i32) {
     for _ in 0..100 {
-        // SAFETY: signal 0 only checks for existence.
-        if pid <= 0 || unsafe { libc::kill(pid, 0) } != 0 {
+        if pid <= 0 || !crate::daemon::pid_alive(pid as u32) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

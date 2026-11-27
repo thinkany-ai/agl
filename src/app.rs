@@ -307,6 +307,7 @@ pub(crate) fn reexec_responsible(me: &std::ffi::OsStr, argv: &[&std::ffi::OsStr]
     }
 }
 
+#[cfg(unix)]
 static CHILD: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 #[cfg(unix)]

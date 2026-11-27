@@ -379,13 +379,28 @@ async fn stop(daemon: &Arc<Daemon>, tasks: Vec<tokio::task::JoinHandle<()>>) {
     SERVING.lock().unwrap().retain(|h| *h != config::home());
 }
 
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         // SAFETY: signal 0 only checks for existence.
         unsafe { libc::kill(pid as i32, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // `tasklist` lists the process by its id while it runs; if it cannot
+        // be asked, assume it still runs, as before.
+        match std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+        {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\"")),
+            Err(_) => true,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         true
