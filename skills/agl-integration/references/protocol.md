@@ -97,6 +97,30 @@ Sessions a hub may not see do not exist for it: methods answer `no session`,
 hub's link. Sessions a hub creates without naming `access` get the link's
 access (default `ask`).
 
+**The link's access is a ceiling** (from the release after 0.3.18). The person sets it on
+the computer (`agl connect <hub> --access …`) and no hub can change it. A hub
+request is refused (`… access `full` is above this link's `ask` …`) when it
+would give or use more access than that:
+
+- `session.create` or `session.configure` naming higher `access`, or
+  `session.create` naming (by `name`) an existing session that runs above it;
+- `session.prompt`, `session.warm`, `session.configure` or an `allow` /
+  `allow_session` answer through `session.approve` on a session that runs
+  above the ceiling: one of the person's own local sessions (`share_local`),
+  or one created before the person lowered the link.
+
+`session.configure` may bring such a session down to the ceiling while it is
+idle, after which the hub can drive it; while a turn runs or is queued it is
+refused (`… is busy …`), since the new access only applies when the agent
+relaunches after those turns. A denial (`deny`, `reject`, `decline`, `no`) is
+always accepted. Local clients have no ceiling. Built-in tools and machine
+methods have their own checks (below).
+
+Not covered: turns already running or queued when the person lowers the link
+keep the access they started with; and `session.abort` / `session.close` are
+not limited by the ceiling (a hub that can see a session can still stop or
+close it).
+
 **Local-only sessions** (from agl 0.3.12). A local client can create a session
 with `visibility: "local"`: no hub link ever sees it, whatever `share_local`
 says. It is left out of `session.list` and `daemon.status` counts, its events
@@ -131,7 +155,7 @@ vanish for its own creator; `"shared"` (the default) is accepted.
 | `daemon.update` | `{if_idle?}` | From agl 0.3.2. Updates agl to the newest release (checked against its sha256) and restarts the daemon on it: `{updated, current, latest, busy?, busy_elsewhere?}`. With `if_idle`, nothing happens while a session runs a turn (`busy`). A restart ends running turns, so a hub never ends another's: while a session the hub did not create (another hub's, or a local one) runs a turn, nothing happens even without `if_idle` (`busy_elsewhere`, also counted in `busy`). Any hub link may call it (from agl 0.3.5; before, `full` only): it installs only the official release, never a binary the hub picks. Below `full`, the update always behaves as `if_idle`; the link comes back by itself. The new daemon is started by the autostart service when it runs this daemon, otherwise by agl itself (before 0.3.8 an installed but idle service unit made agl skip that, and the daemon stayed down). Under launchd agl also kickstarts the job, since launchd may defer a KeepAlive respawn, and even a RunAtLoad start after `agl service install`, indefinitely (0.3.9 / 0.3.10). An agl inside an app bundle is updated with the app instead. |
 | `session.create` | `{agent, cwd?, model?, effort?, access?, name?, resume?, warm?, visibility?, history?, extra_args?, instructions?, ephemeral?, app_name?}` | `SessionMeta`. Details: |
 | | | `name`: if a session with that name exists (and is visible to the caller), it is reused. |
-| | | `access`: when omitted, the config's `default_access` for local callers, the link's `access` (default `ask`) for a hub. |
+| | | `access`: when omitted, the config's `default_access` for local callers, the link's `access` (default `ask`) for a hub. A hub may name less than its link's access, never more ([ceiling](#visibility-one-machine-several-hubs)). |
 | | | `resume`: attaches a native id. |
 | | | `warm`: starts the process now (only takes a free slot). |
 | | | `cwd` defaults to the home directory, and `~/` is expanded. |

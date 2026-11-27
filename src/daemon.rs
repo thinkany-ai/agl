@@ -571,6 +571,32 @@ fn for_caller(mut m: SessionMeta, origin: &Origin) -> SessionMeta {
     m
 }
 
+/// The most a hub may let an agent do: its link's access, which the person
+/// sets on this computer (`agl connect <hub> --access …`) and no hub can
+/// change. `None` for local callers, which have no ceiling.
+fn hub_ceiling(cfg: &Config, origin: &Origin) -> Option<String> {
+    match origin {
+        Origin::Local => None,
+        Origin::Hub { url, .. } => Some(cfg.hub(url).map(|h| h.access.clone()).unwrap_or_else(|| "ask".into())),
+    }
+}
+
+/// Refuse a hub request that would give or use more access than its link's:
+/// creating or reconfiguring a session above it, or driving a session that
+/// runs above it (a local session, or one made before the person lowered the
+/// link). Unknown levels are left to the session manager's own check; an
+/// unreadable ceiling counts as `read_only`.
+fn within_ceiling(cfg: &Config, origin: &Origin, access: &str, method: &str) -> Result<()> {
+    let Some(ceiling) = hub_ceiling(cfg, origin) else { return Ok(()) };
+    let Some(wanted) = crate::session::access_rank(access) else { return Ok(()) };
+    if wanted > crate::session::access_rank(&ceiling).unwrap_or(0) {
+        return Err(anyhow!(
+            "{method}: access `{access}` is above this link's `{ceiling}`; the person sets it on this computer (`agl connect <hub> --access …`)"
+        ));
+    }
+    Ok(())
+}
+
 fn str_param<'a>(params: &'a Value, key: &str) -> Result<&'a str> {
     params[key].as_str().ok_or_else(|| anyhow!("missing parameter `{key}`"))
 }
@@ -682,10 +708,16 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
             }
             let mut p: CreateParams = serde_json::from_value(params).context("session.create params")?;
             if p.access.is_none() {
-                if let Origin::Hub { url, .. } = origin {
-                    // Remote sessions ask before acting unless the link says otherwise.
-                    p.access = Some(mgr.cfg().hub(url).map(|h| h.access.clone()).unwrap_or_else(|| "ask".into()));
-                }
+                // Remote sessions get the link's access unless they ask for less.
+                p.access = hub_ceiling(&mgr.cfg(), origin);
+            }
+            if let Some(a) = &p.access {
+                within_ceiling(&mgr.cfg(), origin, a, method)?;
+            }
+            // A name the caller can see reuses (and may warm) that session as
+            // it is, so its own access must be within the ceiling too.
+            if let Some(existing) = p.name.as_deref().and_then(|n| mgr.resolve_for(n, origin).ok()) {
+                within_ceiling(&mgr.cfg(), origin, &mgr.get(&existing)?.access, method)?;
             }
             if p.app_name.is_none() {
                 if let Origin::Hub { url, .. } = origin {
@@ -696,12 +728,20 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
             serde_json::to_value(for_caller(mgr.create(p)?, origin))?
         }
         "session.prompt" => {
+            let key = sid()?;
+            within_ceiling(&mgr.cfg(), origin, &mgr.get(&key)?.access, method)?;
             let text = str_param(&params, "text")?.to_string();
             let turn_id = params["turn_id"].as_str().map(String::from);
-            mgr.prompt(&sid()?, text, params["mode"].as_str(), turn_id)?
+            mgr.prompt(&key, text, params["mode"].as_str(), turn_id)?
         }
         "session.approve" => {
-            mgr.approve(&sid()?, str_param(&params, "request_id")?, str_param(&params, "decision")?).await?;
+            let key = sid()?;
+            let decision = str_param(&params, "decision")?;
+            // Denying (in any of its spellings) is always allowed: it only ever does less.
+            if crate::agents::Decision::parse(decision) != Some(crate::agents::Decision::Deny) {
+                within_ceiling(&mgr.cfg(), origin, &mgr.get(&key)?.access, method)?;
+            }
+            mgr.approve(&key, str_param(&params, "request_id")?, decision).await?;
             json!({"ok": true})
         }
         "session.abort" => {
@@ -709,12 +749,30 @@ pub async fn dispatch(d: &Arc<Daemon>, method: &str, params: Value, origin: &Ori
             json!({"ok": true})
         }
         "session.warm" => {
-            mgr.warm(&sid()?)?;
+            // Warming starts the agent (and its startup hooks) at the session's access.
+            let key = sid()?;
+            within_ceiling(&mgr.cfg(), origin, &mgr.get(&key)?.access, method)?;
+            mgr.warm(&key)?;
             json!({"ok": true})
         }
         "session.configure" => {
             let key = sid()?;
             let p: ConfigureParams = serde_json::from_value(params).context("session.configure params")?;
+            // The session must end at or below the ceiling: a hub may bring
+            // one that runs above it down, but not raise or keep it there.
+            let before = mgr.get(&key)?;
+            let after = p.access.clone().unwrap_or_else(|| before.access.clone());
+            within_ceiling(&mgr.cfg(), origin, &after, method)?;
+            // A new access applies when the agent relaunches, which waits for
+            // the running and queued turns; until then they, and anything
+            // steered into them, keep the old one. So a hub brings a session
+            // down from above its ceiling only while it is idle.
+            if within_ceiling(&mgr.cfg(), origin, &before.access, method).is_err() && !crate::session::is_idle(&before) {
+                return Err(anyhow!(
+                    "{method}: session runs at `{}` above this link's ceiling and is busy; lower its access when it is idle",
+                    before.access
+                ));
+            }
             serde_json::to_value(for_caller(mgr.configure(&key, p)?, origin))?
         }
         "session.close" => {
@@ -760,6 +818,35 @@ fn launch_setting_in_effect(v: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hub_stays_within_its_links_access() {
+        let url = "https://hub.example/agl";
+        let mut cfg = Config::default();
+        cfg.hubs.push(config::HubLink::new(url));
+        cfg.hubs[0].access = "ask".into();
+        let hub = Origin::Hub { url: url.into(), share_local: true };
+        assert_eq!(hub_ceiling(&cfg, &hub).as_deref(), Some("ask"));
+        for ok in ["read_only", "ask"] {
+            assert!(within_ceiling(&cfg, &hub, ok, "session.create").is_ok(), "{ok}");
+        }
+        for above in ["edit", "full"] {
+            let e = within_ceiling(&cfg, &hub, above, "session.create").unwrap_err().to_string();
+            assert!(e.contains("above this link's `ask`"), "{e}");
+        }
+        // Local callers have no ceiling.
+        assert_eq!(hub_ceiling(&cfg, &Origin::Local), None);
+        assert!(within_ceiling(&cfg, &Origin::Local, "full", "session.create").is_ok());
+        // A hub this computer has no link for gets `ask`, as sessions it creates do.
+        let stranger = Origin::Hub { url: "https://other.example".into(), share_local: false };
+        assert!(within_ceiling(&cfg, &stranger, "edit", "session.prompt").is_err());
+        // An unreadable ceiling holds as `read_only`.
+        cfg.hubs[0].access = "everything".into();
+        assert!(within_ceiling(&cfg, &hub, "ask", "session.prompt").is_err());
+        assert!(within_ceiling(&cfg, &hub, "read_only", "session.prompt").is_ok());
+        // Unknown levels are left to the session manager's own error.
+        assert!(within_ceiling(&cfg, &hub, "bogus", "session.create").is_ok());
+    }
 
     #[test]
     fn hello_lists_computer_use_only_for_links_that_have_it_on() {

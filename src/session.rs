@@ -30,6 +30,12 @@ use crate::shellenv;
 
 pub const ACCESS_LEVELS: &[&str] = &["full", "edit", "ask", "read_only"];
 
+/// How much an access level lets an agent do, lowest first (`read_only` is
+/// 0, `full` 3); `None` for a level that does not exist.
+pub fn access_rank(access: &str) -> Option<usize> {
+    ["read_only", "ask", "edit", "full"].iter().position(|a| *a == access)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: String,
