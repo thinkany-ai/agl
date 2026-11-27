@@ -78,7 +78,7 @@ pub struct CustomAgent {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
-    /// acp | claude | codex
+    /// acp | claude | codex | cursor | pi
     #[serde(default = "default_protocol")]
     pub protocol: String,
     #[serde(default)]

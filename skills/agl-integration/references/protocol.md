@@ -484,6 +484,10 @@ Custom agents carry no `install` or update fields. Detection only reads; nothing
 }
 ```
 
+`custom_agents[].protocol`: `acp` (the default), `claude` or `codex`; from
+0.3.23 also `cursor` and `pi`, so an entry with a built-in agent's id can move
+that agent's executable or add to its environment whatever drives it.
+
 `custom_agents[].icon` (from 0.3.19): SVG markup for the agent's `icon` in
 `agents.list`. agl passes it on only as plain SVG under 32 KiB, with no
 scripts, event handlers, `javascript:` or external references, `<use>` or

@@ -158,6 +158,10 @@ pub fn registry(cfg: &Config) -> Vec<AgentDef> {
         let protocol = match c.protocol.as_str() {
             "claude" => Claude,
             "codex" => Codex,
+            // The one-shot agents: an entry that moves a built-in one's
+            // executable or adds to its environment keeps how it is driven.
+            "cursor" => Cursor,
+            "pi" => Pi,
             _ => Acp,
         };
         let d = custom_def(c, protocol);
@@ -1088,6 +1092,25 @@ mod reap_tests {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_custom_entry_moves_a_one_shot_agents_executable() {
+        let entry = |id: &str, protocol: &str| crate::config::CustomAgent {
+            id: id.into(),
+            name: None,
+            command: format!("/opt/{id}"),
+            args: Vec::new(),
+            protocol: protocol.into(),
+            env: Default::default(),
+            icon: None,
+        };
+        let cfg = Config { custom_agents: vec![entry("cursor", "cursor"), entry("pi", "pi"), entry("goose", "acp")], ..Config::default() };
+        let reg = registry(&cfg);
+        let of = |id: &str| reg.iter().find(|d| d.id == id).unwrap();
+        assert_eq!((of("cursor").protocol, of("cursor").commands.clone()), (Protocol::Cursor, vec!["/opt/cursor".to_string()]));
+        assert_eq!(of("pi").protocol, Protocol::Pi);
+        assert_eq!(of("goose").protocol, Protocol::Acp);
+    }
 
     #[test]
     fn instructions_are_taken_by_the_agents_that_append_them() {
